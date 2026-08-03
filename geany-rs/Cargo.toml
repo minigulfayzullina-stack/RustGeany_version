@@ -13,8 +13,7 @@ parking_lot = "0.12"
 dirs = "6"
 rfd = "0.15"           # Native file dialogs
 regex = "1"            # For find/replace and symbol parsing
-portable-pty = "0.8"   # Terminal emulator
-tokio = { version = "1", features = ["full"] }
+whoami = "1"           # For terminal username
 
 [profile.release]
 opt-level = 3
