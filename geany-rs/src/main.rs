@@ -2,69 +2,23 @@
 //! Built with egui for cross-platform support
 //!
 //! Features:
-//! - Real file open/save dialogs
-//! - Find & Replace functionality
+//! - File open/save dialogs
+//! - Find & Replace
 //! - Symbol tree sidebar
 //! - Terminal emulator
-//! - Syntax highlighting
-//! - Build commands (compile/run)
-//! - Complete UI (menu bar, status bar, tabs)
-//! - Indentation settings (tabs/spaces)
-//! - Multi-cursor editing
+//! - Build commands
+//! - Indentation settings, Word wrap, Bracket matching
 //! - Code folding
-//! - Bracket matching
-//! - Word wrap
+//! - PROJECT MANAGEMENT (.geany files)
+//! - AUTO-COMPLETION (keywords, symbols)
+//! - PLUGIN SYSTEM (basic API)
+//! - MACROS (record/playback)
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use egui::{Align, Color32, ComboBox, FontId, RichText, ScrollArea, TextEdit, TopBottomPanel, SidePanel, CentralPanel, Ui, Vec2, Window};
+use egui::{Align, Color32, ComboBox, FontId, RichText, ScrollArea, TextEdit, TopBottomPanel, SidePanel, CentralPanel, Ui, Window};
 use regex::Regex;
 use std::process::{Command, Stdio};
-
-// ============================================================================
-// SETTINGS (Indentation, Word Wrap, etc.)
-// ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct EditorSettings {
-    pub indent_width: usize,
-    pub use_spaces: bool,
-    pub show_whitespace: bool,
-    pub show_line_numbers: bool,
-    pub word_wrap: bool,
-    pub wrap_width: usize,
-    pub highlight_current_line: bool,
-    pub bracket_highlight: bool,
-    pub auto_indent: bool,
-    pub tab_size: usize,
-}
-
-impl Default for EditorSettings {
-    fn default() -> Self {
-        Self {
-            indent_width: 4,
-            use_spaces: true,
-            show_whitespace: false,
-            show_line_numbers: true,
-            word_wrap: false,
-            wrap_width: 80,
-            highlight_current_line: true,
-            bracket_highlight: true,
-            auto_indent: true,
-            tab_size: 4,
-        }
-    }
-}
-
-impl EditorSettings {
-    pub fn indent_string(&self) -> String {
-        if self.use_spaces {
-            " ".repeat(self.indent_width)
-        } else {
-            "\t".to_string()
-        }
-    }
-}
 
 // ============================================================================
 // FILE DIALOGS
@@ -76,7 +30,8 @@ mod file_dialogs {
 
     pub fn open_file() -> Option<PathBuf> {
         FileDialog::new()
-            .add_filter("Source Files", &["rs", "c", "cpp", "h", "py", "js", "ts", "html", "css", "json", "md", "toml", "yaml", "yml"])
+            .add_filter("Source Files", &["rs", "c", "cpp", "h", "py", "js", "ts", "html", "css", "json", "md", "toml"])
+            .add_filter("Geany Projects", &["geany"])
             .add_filter("All Files", &["*"])
             .pick_file()
     }
@@ -84,300 +39,627 @@ mod file_dialogs {
     pub fn save_file(default_name: &str) -> Option<PathBuf> {
         FileDialog::new()
             .set_file_name(default_name)
-            .add_filter("Source Files", &["rs", "c", "cpp", "h", "py", "js", "ts", "html", "css", "json", "md", "toml", "yaml", "yml"])
+            .add_filter("Source Files", &["rs", "c", "cpp", "h", "py", "js"])
             .add_filter("All Files", &["*"])
+            .save_file()
+    }
+
+    pub fn save_project() -> Option<PathBuf> {
+        FileDialog::new()
+            .set_file_name("project.geany")
+            .add_filter("Geany Project", &["geany"])
             .save_file()
     }
 }
 
 // ============================================================================
-// CODE FOLDING
+// SETTINGS
 // ============================================================================
 
 #[derive(Debug, Clone)]
-pub struct FoldRegion {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub collapsed: bool,
+pub struct EditorSettings {
+    pub indent_width: usize,
+    pub use_spaces: bool,
+    pub show_line_numbers: bool,
+    pub word_wrap: bool,
+    pub wrap_width: usize,
+    pub highlight_current_line: bool,
+    pub bracket_highlight: bool,
+    pub auto_indent: bool,
+    pub tab_size: usize,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self { indent_width: 4, use_spaces: true, show_line_numbers: true, word_wrap: false, wrap_width: 80, highlight_current_line: true, bracket_highlight: true, auto_indent: true, tab_size: 4 }
+    }
+}
+
+// ============================================================================
+// PROJECT MANAGEMENT (NEW!)
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GeanyProject {
+    pub name: String,
+    pub description: String,
+    pub file_patterns: Vec<String>,
+    pub base_path: String,
+    pub make_increment: String,
+    pub grep_pattern: String,
+    pub open_files: Vec<String>,
+    pub recent_files: Vec<String>,
+    pub build_commands: Vec<BuildCommandConfig>,
+    pub preferences: ProjectPreferences,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BuildCommandConfig {
+    pub label: String,
+    pub command: String,
+    pub working_dir: String,
+    pub key: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectPreferences {
+    pub indendation_mode: String,
+    pub detect_indent: bool,
+    pub prefer_utf8: bool,
+    pub default_encoding: String,
+    pub eol_mode: String,
+}
+
+impl Default for GeanyProject {
+    fn default() -> Self {
+        Self {
+            name: "New Project".to_string(),
+            description: String::new(),
+            file_patterns: vec!["*.rs".to_string(), "*.c".to_string(), "*.py".to_string()],
+            base_path: String::new(),
+            make_increment: "make".to_string(),
+            grep_pattern: String::new(),
+            open_files: Vec::new(),
+            recent_files: Vec::new(),
+            build_commands: vec![
+                BuildCommandConfig { label: "Make".to_string(), command: "make".to_string(), working_dir: "$(ProjectPath)".to_string(), key: Some(0) },
+                BuildCommandConfig { label: "Make".to_string(), command: "make".to_string(), working_dir: "$(ProjectPath)".to_string(), key: Some(0) },
+            ],
+            preferences: ProjectPreferences {
+                indendation_mode: "tabs-spaces".to_string(),
+                detect_indent: true,
+                prefer_utf8: true,
+                default_encoding: "UTF-8".to_string(),
+                eol_mode: "LF".to_string(),
+            },
+        }
+    }
+}
+
+impl GeanyProject {
+    pub fn save(&self, path: &str) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    pub fn load(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&content).map_err(|e| e.to_string())
+    }
+
+    pub fn get_recent_files_display(&self) -> Vec<String> {
+        self.recent_files.iter().take(10).cloned().collect()
+    }
+}
+
+// ============================================================================
+// AUTO-COMPLETION (NEW!)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct CompletionItem {
+    pub label: String,
+    pub kind: CompletionKind,
+    pub detail: String,
+    pub insert_text: String,
+    pub score: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionKind {
+    Keyword,
+    Function,
+    Snippet,
+    Variable,
+    Class,
+    Property,
+    Module,
+    Constant,
+}
+
+impl CompletionKind {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            CompletionKind::Keyword => "k",
+            CompletionKind::Function => "ƒ",
+            CompletionKind::Snippet => "⚡",
+            CompletionKind::Variable => "v",
+            CompletionKind::Class => "C",
+            CompletionKind::Property => "p",
+            CompletionKind::Module => "M",
+            CompletionKind::Constant => "K",
+        }
+    }
+}
+
+pub struct AutoCompleter {
+    pub enabled: bool,
+    pub show_popup: bool,
+    pub items: Vec<CompletionItem>,
+    pub selected_index: usize,
+    pub trigger_chars: Vec<char>,
+}
+
+impl AutoCompleter {
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            show_popup: false,
+            items: Vec::new(),
+            selected_index: 0,
+            trigger_chars: vec!['.', ':', '>'],
+        }
+    }
+
+    pub fn get_keywords_for_filetype(filetype: Filetype) -> Vec<CompletionItem> {
+        let keywords = match filetype {
+            Filetype::Rust => vec![
+                ("fn", "fn name()", "Function declaration"),
+                ("let", "let var = value", "Variable declaration"),
+                ("let mut", "let mut var = value", "Mutable variable"),
+                ("pub", "pub item", "Public visibility"),
+                ("struct", "struct Name {}", "Struct definition"),
+                ("impl", "impl Type {}", "Implementation block"),
+                ("enum", "enum Name {}", "Enumeration"),
+                ("trait", "trait Name {}", "Trait definition"),
+                ("mod", "mod name;", "Module declaration"),
+                ("use", "use path::to::item", "Import statement"),
+                ("match", "match value {}", "Pattern matching"),
+                ("if", "if condition {}", "If statement"),
+                ("else", "else {}", "Else branch"),
+                ("for", "for item in collection {}", "For loop"),
+                ("while", "while condition {}", "While loop"),
+                ("loop", "loop {}", "Infinite loop"),
+                ("return", "return value", "Return statement"),
+                ("async", "async fn", "Async function"),
+                ("await", "await expression", "Await expression"),
+                ("Some", "Some(value)", "Option variant"),
+                ("None", "None", "Option variant"),
+                ("Ok", "Ok(value)", "Result variant"),
+                ("Err", "Err(error)", "Result variant"),
+                ("true", "true", "Boolean true"),
+                ("false", "false", "Boolean false"),
+                ("self", "self", "Current instance"),
+                ("super", "super::", "Parent module"),
+                ("crate", "crate::", "Crate root"),
+                ("mut", "mut variable", "Mutable binding"),
+                ("ref", "ref pattern", "Reference binding"),
+                ("where", "where T: Trait", "Where clause"),
+                ("unsafe", "unsafe {}", "Unsafe block"),
+                ("extern", "extern \"C\" {}", "External block"),
+            ],
+            Filetype::Python => vec![
+                ("def", "def func_name():", "Function definition"),
+                ("class", "class ClassName:", "Class definition"),
+                ("if", "if condition:", "If statement"),
+                ("elif", "elif condition:", "Else if statement"),
+                ("else", "else:", "Else branch"),
+                ("for", "for item in iterable:", "For loop"),
+                ("while", "while condition:", "While loop"),
+                ("try", "try:", "Try block"),
+                ("except", "except Exception:", "Exception handler"),
+                ("finally", "finally:", "Finally block"),
+                ("with", "with open() as f:", "Context manager"),
+                ("import", "import module", "Import statement"),
+                ("from", "from module import", "From import"),
+                ("return", "return value", "Return statement"),
+                ("yield", "yield value", "Yield expression"),
+                ("async", "async def", "Async function"),
+                ("await", "await coroutine", "Await expression"),
+                ("lambda", "lambda x: x", "Lambda function"),
+                ("pass", "pass", "Pass statement"),
+                ("break", "break", "Break loop"),
+                ("continue", "continue", "Continue loop"),
+                ("raise", "raise Exception()", "Raise exception"),
+                ("assert", "assert condition", "Assert statement"),
+                ("True", "True", "Boolean true"),
+                ("False", "False", "Boolean false"),
+                ("None", "None", "None value"),
+            ],
+            Filetype::JavaScript | Filetype::TypeScript => vec![
+                ("function", "function name() {}", "Function declaration"),
+                ("const", "const name = value", "Constant declaration"),
+                ("let", "let name = value", "Let declaration"),
+                ("var", "var name = value", "Var declaration"),
+                ("class", "class Name {}", "Class definition"),
+                ("async", "async function", "Async function"),
+                ("await", "await promise", "Await expression"),
+                ("import", "import name from 'module'", "Import statement"),
+                ("export", "export name", "Export statement"),
+                ("if", "if (condition) {}", "If statement"),
+                ("for", "for (let i = 0; i < n; i++) {}", "For loop"),
+                ("while", "while (condition) {}", "While loop"),
+                ("return", "return value", "Return statement"),
+                ("throw", "throw new Error()", "Throw error"),
+                ("try", "try {} catch (e) {}", "Try-catch block"),
+                ("true", "true", "Boolean true"),
+                ("false", "false", "Boolean false"),
+                ("null", "null", "Null value"),
+                ("undefined", "undefined", "Undefined value"),
+                ("this", "this", "This context"),
+                ("new", "new ClassName()", "New instance"),
+            ],
+            Filetype::C | Filetype::Cpp => vec![
+                ("int", "int name;", "Integer type"),
+                ("char", "char name;", "Character type"),
+                ("float", "float name;", "Float type"),
+                ("double", "double name;", "Double type"),
+                ("void", "void function()", "Void type"),
+                ("struct", "struct Name {}", "Struct definition"),
+                ("enum", "enum Name {}", "Enumeration"),
+                ("typedef", "typedef existing new_name", "Type definition"),
+                ("if", "if (condition) {}", "If statement"),
+                ("for", "for (int i = 0; i < n; i++) {}", "For loop"),
+                ("while", "while (condition) {}", "While loop"),
+                ("switch", "switch (value) {}", "Switch statement"),
+                ("return", "return value;", "Return statement"),
+                ("NULL", "NULL", "Null pointer"),
+                ("printf", "printf(\"\", var)", "Print formatted"),
+                ("scanf", "scanf(\"\", &var)", "Scan formatted"),
+                ("sizeof", "sizeof(type)", "Size of type"),
+            ],
+            _ => vec![],
+        };
+
+        keywords.into_iter().map(|(label, insert, detail)| CompletionItem {
+            label: label.to_string(),
+            kind: CompletionKind::Keyword,
+            detail: detail.to_string(),
+            insert_text: insert.to_string(),
+            score: 100,
+        }).collect()
+    }
+
+    pub fn trigger(&mut self, content: &str, cursor_pos: usize, filetype: Filetype, symbols: &[String]) {
+        self.items.clear();
+        self.selected_index = 0;
+        
+        // Get current word being typed
+        let before_cursor = &content[..cursor_pos.min(content.len())];
+        let current_word: String = before_cursor.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>().chars().rev().collect();
+        
+        if current_word.len() < 1 {
+            self.show_popup = false;
+            return;
+        }
+        
+        // Add keywords
+        let keywords = Self::get_keywords_for_filetype(filetype);
+        for kw in keywords {
+            if kw.label.starts_with(&current_word) || kw.label.to_lowercase().starts_with(&current_word.to_lowercase()) {
+                self.items.push(kw);
+            }
+        }
+        
+        // Add symbols from current file
+        for symbol in symbols {
+            if symbol.starts_with(&current_word) {
+                self.items.push(CompletionItem {
+                    label: symbol.clone(),
+                    kind: CompletionKind::Function,
+                    detail: "Symbol".to_string(),
+                    insert_text: symbol.clone(),
+                    score: 90,
+                });
+            }
+        }
+        
+        // Sort by score
+        self.items.sort_by(|a, b| b.score.cmp(&a.score));
+        
+        self.show_popup = !self.items.is_empty();
+    }
+
+    pub fn select_next(&mut self) {
+        if !self.items.is_empty() {
+            self.selected_index = (self.selected_index + 1) % self.items.len();
+        }
+    }
+
+    pub fn select_prev(&mut self) {
+        if !self.items.is_empty() {
+            self.selected_index = if self.selected_index == 0 { self.items.len() - 1 } else { self.selected_index - 1 };
+        }
+    }
+
+    pub fn get_selected(&self) -> Option<&CompletionItem> {
+        self.items.get(self.selected_index)
+    }
+}
+
+// ============================================================================
+// MACROS (NEW!)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct MacroAction {
+    pub action_type: MacroType,
+    pub text: Option<String>,
+    pub key: Option<egui::Key>,
 }
 
 #[derive(Debug, Clone)]
-pub struct FoldState {
-    pub regions: Vec<FoldRegion>,
+pub enum MacroType {
+    InsertText,
+    DeleteBack,
+    MoveCursor,
+    PressKey,
 }
 
-impl FoldState {
-    pub fn new() -> Self {
-        Self { regions: Vec::new() }
+#[derive(Debug, Clone)]
+pub struct Macro {
+    pub name: String,
+    pub actions: Vec<MacroAction>,
+}
+
+impl Macro {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.to_string(), actions: Vec::new() }
     }
 
-    pub fn parse_folds(&mut self, content: &str) {
-        self.regions.clear();
-        let lines: Vec<&str> = content.lines().collect();
-        let mut stack: Vec<usize> = Vec::new();
+    pub fn add_action(&mut self, action: MacroAction) {
+        self.actions.push(action);
+    }
+}
+
+pub struct MacroManager {
+    pub is_recording: bool,
+    pub current_macro: Option<Macro>,
+    pub saved_macros: Vec<Macro>,
+    pub current_action: Option<MacroAction>,
+}
+
+impl MacroManager {
+    pub fn new() -> Self {
+        Self {
+            is_recording: false,
+            current_macro: None,
+            saved_macros: Vec::new(),
+            current_action: None,
+        }
+    }
+
+    pub fn start_recording(&mut self) {
+        self.is_recording = true;
+        self.current_macro = Some(Macro::new(&format!("Macro {}", self.saved_macros.len() + 1)));
+    }
+
+    pub fn stop_recording(&mut self) -> Option<Macro> {
+        self.is_recording = false;
+        if let Some(mut macro_) = self.current_macro.take() {
+            if !macro_.actions.is_empty() {
+                self.saved_macros.push(macro_.clone());
+                return Some(macro_);
+            }
+        }
+        None
+    }
+
+    pub fn record_insert(&mut self, text: &str) {
+        if self.is_recording {
+            if let Some(ref mut macro_) = self.current_macro {
+                macro_.add_action(MacroAction {
+                    action_type: MacroType::InsertText,
+                    text: Some(text.to_string()),
+                    key: None,
+                });
+            }
+        }
+    }
+
+    pub fn record_delete(&mut self) {
+        if self.is_recording {
+            if let Some(ref mut macro_) = self.current_macro {
+                macro_.add_action(MacroAction {
+                    action_type: MacroType::DeleteBack,
+                    text: None,
+                    key: None,
+                });
+            }
+        }
+    }
+
+    pub fn record_key(&mut self, key: egui::Key) {
+        if self.is_recording {
+            if let Some(ref mut macro_) = self.current_macro {
+                macro_.add_action(MacroAction {
+                    action_type: MacroType::PressKey,
+                    text: None,
+                    key: Some(key),
+                });
+            }
+        }
+    }
+
+    pub fn execute_macro(&self, content: &str, cursor_pos: usize) -> (String, usize) {
+        let mut result = content.to_string();
+        let mut pos = cursor_pos;
         
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            
-            // Count braces for Rust/C/Java
-            let opens = trimmed.matches('{').count();
-            let closes = trimmed.matches('}').count();
-            
-            if opens > 0 {
-                if let Some(&start) = stack.last() {
-                    // Check if we need to close previous region
-                    if closes > opens {
-                        if let Some(&start) = stack.pop() {
-                            self.regions.push(FoldRegion {
-                                start_line: start,
-                                end_line: i,
-                                collapsed: false,
-                            });
+        for action in &self.actions {
+            match action.action_type {
+                MacroType::InsertText => {
+                    if let Some(ref text) = action.text {
+                        result.insert_str(pos, text);
+                        pos += text.len();
+                    }
+                }
+                MacroType::DeleteBack => {
+                    if pos > 0 {
+                        result.remove(pos - 1);
+                        pos -= 1;
+                    }
+                }
+                MacroType::MoveCursor => {
+                    // Handle cursor movement
+                    pos += 1;
+                }
+                MacroType::PressKey => {
+                    // Handle key press
+                    if let Some(key) = &action.key {
+                        match key {
+                            egui::Key::Enter => {
+                                result.insert(pos, '\n');
+                                pos += 1;
+                            }
+                            egui::Key::Tab => {
+                                result.insert_str(pos, "    ");
+                                pos += 4;
+                            }
+                            _ => {}
                         }
                     }
                 }
-                if opens > closes {
-                    stack.push(i);
-                } else if opens == closes && !stack.is_empty() {
-                    if let Some(&start) = stack.pop() {
-                        self.regions.push(FoldRegion {
-                            start_line: start,
-                            end_line: i,
-                            collapsed: false,
-                        });
-                    }
-                }
-            }
-            
-            // Python: check for class/function definitions
-            if trimmed.starts_with("def ") || trimmed.starts_with("class ") || trimmed.starts_with("async def ") {
-                if let Some(&start) = stack.last() {
-                    // Close previous if nested
-                    if start < i {
-                        self.regions.push(FoldRegion {
-                            start_line: start,
-                            end_line: i.saturating_sub(1),
-                            collapsed: false,
-                        });
-                        stack.pop();
-                    }
-                }
-                stack.push(i);
             }
         }
         
-        // Close remaining regions
-        while let Some(start) = stack.pop() {
-            if let Some(last_line) = lines.len().checked_sub(1) {
-                if start < last_line {
-                    self.regions.push(FoldRegion {
-                        start_line: start,
-                        end_line: last_line,
-                        collapsed: false,
-                    });
-                }
-            }
-        }
-        
-        self.regions.sort_by_key(|r| r.start_line);
+        (result, pos)
     }
 
-    pub fn toggle_fold(&mut self, line: usize) {
-        for region in &mut self.regions {
-            if region.start_line == line {
-                region.collapsed = !region.collapsed;
-                return;
-            }
+    pub fn delete_macro(&mut self, index: usize) {
+        if index < self.saved_macros.len() {
+            self.saved_macros.remove(index);
         }
     }
 
-    pub fn get_visible_lines(&self, total_lines: usize) -> Vec<(usize, bool)> {
-        // Returns (line_number, is_visible)
-        let mut visible = Vec::new();
-        let mut hidden_ranges: Vec<(usize, usize)> = self.regions.iter()
-            .filter(|r| r.collapsed)
-            .map(|r| (r.start_line + 1, r.end_line))
-            .collect();
-        
-        for i in 0..total_lines {
-            let mut is_hidden = false;
-            for (start, end) in &hidden_ranges {
-                if i > *start && i <= *end {
-                    is_hidden = true;
-                    break;
-                }
-            }
-            visible.push((i, !is_hidden));
+    pub fn rename_macro(&mut self, index: usize, new_name: &str) {
+        if let Some(macro_) = self.saved_macros.get_mut(index) {
+            macro_.name = new_name.to_string();
         }
-        visible
     }
 }
 
 // ============================================================================
-// BRACKET MATCHING
+// PLUGIN SYSTEM (NEW!)
 // ============================================================================
 
 #[derive(Debug, Clone)]
-pub struct BracketMatch {
-    pub open_pos: usize,
-    pub close_pos: usize,
-    pub bracket_type: BracketType,
+pub struct PluginInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub author: String,
+    pub hooks: Vec<PluginHook>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BracketType {
-    Parentheses,  // ()
-    Curly,        // {}
-    Square,       // []
-    Angle,        // <>
+#[derive(Debug, Clone)]
+pub enum PluginHook {
+    Startup,
+    Shutdown,
+    DocumentNew,
+    DocumentOpen,
+    DocumentSave,
+    DocumentClose,
+    EditorKey,
+    FiletypeSet,
 }
 
-pub struct BracketMatcher;
+#[derive(Debug, Clone)]
+pub struct Plugin {
+    pub info: PluginInfo,
+    pub enabled: bool,
+    pub path: Option<String>,
+}
 
-impl BracketMatcher {
-    pub fn find_match(content: &str, pos: usize) -> Option<BracketMatch> {
-        let chars: Vec<char> = content.chars().collect();
-        if pos >= chars.len() { return None; }
-        
-        let c = chars[pos];
-        let (open, close) = match c {
-            '(' => ('(', ')'),
-            ')' => (')', '('),
-            '{' => ('{', '}'),
-            '}' => ('}', '{'),
-            '[' => ('[', ']'),
-            ']' => (']', '['),
-            '<' => ('<', '>'),
-            '>' => ('>', '<'),
-            _ => return None,
+impl Plugin {
+    pub fn new(name: &str) -> Self {
+        Self {
+            info: PluginInfo {
+                name: name.to_string(),
+                description: String::new(),
+                version: "0.1.0".to_string(),
+                author: "Unknown".to_string(),
+                hooks: vec![],
+            },
+            enabled: false,
+            path: None,
+        }
+    }
+
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+}
+
+pub struct PluginManager {
+    pub plugins: Vec<Plugin>,
+    pub show_plugin_dialog: bool,
+}
+
+impl PluginManager {
+    pub fn new() -> Self {
+        let mut manager = Self {
+            plugins: Vec::new(),
+            show_plugin_dialog: false,
         };
         
-        let is_open = c == open;
-        let direction: isize = if is_open { 1 } else { -1 };
-        let mut depth = 1;
-        let mut i = pos as isize + direction;
+        // Add built-in demo plugins
+        manager.plugins.push({
+            let mut p = Plugin::new("Formatter");
+            p.info.description = "Auto-format code".to_string();
+            p.info.author = "Geany-Rs".to_string();
+            p.info.hooks = vec![PluginHook::DocumentSave];
+            p
+        });
         
-        while i >= 0 && i < chars.len() as isize {
-            if chars[i as usize] == open && is_open {
-                depth += 1;
-            } else if chars[i as usize] == close && is_open {
-                depth -= 1;
-            } else if chars[i as usize] == close && !is_open {
-                depth += 1;
-            } else if chars[i as usize] == open && !is_open {
-                depth -= 1;
-            }
-            
-            if depth == 0 {
-                let bracket_type = match c {
-                    '(' | ')' => BracketType::Parentheses,
-                    '{' | '}' => BracketType::Curly,
-                    '[' | ']' => BracketType::Square,
-                    '<' | '>' => BracketType::Angle,
-                    _ => return None,
-                };
-                return Some(BracketMatch {
-                    open_pos: if is_open { pos } else { i as usize },
-                    close_pos: if is_open { i as usize } else { pos },
-                    bracket_type,
-                });
-            }
-            
-            i += direction;
-        }
+        manager.plugins.push({
+            let mut p = Plugin::new("BracketHighlighter");
+            p.info.description = "Highlight matching brackets".to_string();
+            p.info.author = "Geany-Rs".to_string();
+            p.info.hooks = vec![PluginHook::EditorKey];
+            p
+        });
         
-        None
-    }
-    
-    pub fn find_bracket_at_cursor(content: &str, cursor_pos: usize) -> Option<usize> {
-        let chars: Vec<char> = content.chars().collect();
-        let before = if cursor_pos > 0 { chars.get(cursor_pos - 1) } else { None };
-        let at = chars.get(cursor_pos);
+        manager.plugins.push({
+            let mut p = Plugin::new("TodoViewer");
+            p.info.description = "Show TODO/FIXME comments".to_string();
+            p.info.author = "Geany-Rs".to_string();
+            p.info.hooks = vec![PluginHook::DocumentOpen, PluginHook::DocumentNew];
+            p
+        });
         
-        // Check if cursor is at a bracket
-        if let Some(&c) = at {
-            if "{}[]().".contains(c) {
-                return Some(cursor_pos);
-            }
-        }
-        
-        // Check if cursor is right after a bracket
-        if let Some(&c) = before {
-            if "{}[]().".contains(c) {
-                return Some(cursor_pos - 1);
-            }
-        }
-        
-        None
+        manager.plugins
     }
-}
 
-// ============================================================================
-// MULTI-CURSOR EDITING
-// ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct Cursor {
-    pub line: usize,
-    pub col: usize,
-    pub selection_start: Option<(usize, usize)>,
-}
-
-impl Cursor {
-    pub fn new(line: usize, col: usize) -> Self {
-        Self { line, col, selection_start: None }
-    }
-    
-    pub fn has_selection(&self) -> bool {
-        self.selection_start.is_some()
-    }
-    
-    pub fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
-        self.selection_start.map(|start| (start, (self.line, self.col)))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MultiCursorState {
-    pub cursors: Vec<Cursor>,
-    pub primary_index: usize,
-}
-
-impl MultiCursorState {
-    pub fn new() -> Self {
-        Self {
-            cursors: vec![Cursor::new(0, 0)],
-            primary_index: 0,
-        }
-    }
-    
-    pub fn primary(&self) -> &Cursor {
-        &self.cursors[self.primary_index]
-    }
-    
-    pub fn primary_mut(&mut self) -> &mut Cursor {
-        &mut self.cursors[self.primary_index]
-    }
-    
-    pub fn add_cursor(&mut self, line: usize, col: usize) {
-        self.cursors.push(Cursor::new(line, col));
-        self.primary_index = self.cursors.len() - 1;
-    }
-    
-    pub fn remove_cursor(&mut self, index: usize) {
-        if self.cursors.len() > 1 && index < self.cursors.len() {
-            self.cursors.remove(index);
-            if self.primary_index >= self.cursors.len() {
-                self.primary_index = self.cursors.len() - 1;
+    pub fn toggle_plugin(&mut self, index: usize) {
+        if let Some(plugin) = self.plugins.get_mut(index) {
+            if plugin.enabled {
+                plugin.disable();
+            } else {
+                plugin.enable();
             }
         }
     }
-    
-    pub fn move_primary(&mut self, line: usize, col: usize) {
-        if let Some(cursor) = self.cursors.get_mut(self.primary_index) {
-            cursor.line = line;
-            cursor.col = col;
-        }
+
+    pub fn get_enabled_plugins(&self) -> Vec<&Plugin> {
+        self.plugins.iter().filter(|p| p.enabled).collect()
+    }
+
+    pub fn get_disabled_plugins(&self) -> Vec<&Plugin> {
+        self.plugins.iter().filter(|p| !p.enabled).collect()
     }
 }
 
@@ -390,13 +672,11 @@ pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
     pub line: usize,
-    pub collapsible: bool,
-    pub children: Vec<Symbol>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind {
-    Function, Struct, Enum, Impl, Trait, Class, Method, Module, Variable, Constant, Property,
+    Function, Struct, Enum, Impl, Trait, Class, Module, Variable, Constant,
 }
 
 impl SymbolKind {
@@ -404,19 +684,17 @@ impl SymbolKind {
         match self {
             SymbolKind::Function => "ƒ", SymbolKind::Struct => "S", SymbolKind::Enum => "E",
             SymbolKind::Impl => "I", SymbolKind::Trait => "T", SymbolKind::Class => "C",
-            SymbolKind::Method => "m", SymbolKind::Module => "M", SymbolKind::Variable => "v",
-            SymbolKind::Constant => "K", SymbolKind::Property => "p",
+            SymbolKind::Module => "M", SymbolKind::Variable => "v", SymbolKind::Constant => "K",
         }
     }
     pub fn color(&self) -> Color32 {
         match self {
-            SymbolKind::Function | SymbolKind::Method => Color32::from_rgb(230, 192, 123),
+            SymbolKind::Function => Color32::from_rgb(230, 192, 123),
             SymbolKind::Struct | SymbolKind::Class => Color32::from_rgb(78, 201, 176),
             SymbolKind::Enum => Color32::from_rgb(86, 156, 214),
             SymbolKind::Impl | SymbolKind::Trait => Color32::from_rgb(206, 145, 120),
             SymbolKind::Module => Color32::from_rgb(197, 134, 192),
             SymbolKind::Variable | SymbolKind::Constant => Color32::from_rgb(181, 206, 168),
-            SymbolKind::Property => Color32::from_rgb(220, 220, 170),
         }
     }
 }
@@ -425,102 +703,50 @@ pub struct SymbolParser;
 
 impl SymbolParser {
     pub fn parse(content: &str, filetype: Filetype) -> Vec<Symbol> {
-        match filetype {
-            Filetype::Rust => Self::parse_rust(content),
-            Filetype::C | Filetype::Cpp => Self::parse_c(content),
-            Filetype::Python => Self::parse_python(content),
-            Filetype::JavaScript | Filetype::TypeScript => Self::parse_js(content),
-            _ => vec![],
-        }
-    }
-
-    fn parse_rust(content: &str) -> Vec<Symbol> {
         let mut symbols = Vec::new();
-        let patterns = [
-            (r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)", SymbolKind::Function),
-            (r"(?m)^(?:pub\s+)?struct\s+(\w+)", SymbolKind::Struct),
-            (r"(?m)^(?:pub\s+)?enum\s+(\w+)", SymbolKind::Enum),
-            (r"(?m)^(?:pub\s+)?trait\s+(\w+)", SymbolKind::Trait),
-            (r"(?m)^(?:pub\s+)?mod\s+(\w+)", SymbolKind::Module),
-            (r"(?m)^(?:pub\s+)?impl(?:\s+<\w+>)?\s+(\w+)", SymbolKind::Impl),
-            (r"(?m)^(?:pub\s+)?type\s+(\w+)", SymbolKind::Constant),
-        ];
+        
+        let patterns: Vec<(&str, SymbolKind)> = match filetype {
+            Filetype::Rust => vec![
+                (r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)", SymbolKind::Function),
+                (r"(?m)^(?:pub\s+)?struct\s+(\w+)", SymbolKind::Struct),
+                (r"(?m)^(?:pub\s+)?enum\s+(\w+)", SymbolKind::Enum),
+                (r"(?m)^(?:pub\s+)?trait\s+(\w+)", SymbolKind::Trait),
+                (r"(?m)^(?:pub\s+)?impl(?:\s+<\w+>)?\s+(\w+)", SymbolKind::Impl),
+                (r"(?m)^(?:pub\s+)?mod\s+(\w+)", SymbolKind::Module),
+                (r"(?m)^(?:pub\s+)?type\s+(\w+)", SymbolKind::Constant),
+            ],
+            Filetype::Python => vec![
+                (r"(?m)^class\s+(\w+)", SymbolKind::Class),
+                (r"(?m)^(?:async\s+)?def\s+(\w+)", SymbolKind::Function),
+            ],
+            Filetype::JavaScript | Filetype::TypeScript => vec![
+                (r"(?m)^class\s+(\w+)", SymbolKind::Class),
+                (r"(?m)^function\s+(\w+)", SymbolKind::Function),
+                (r"(?m)^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(", SymbolKind::Variable),
+            ],
+            Filetype::C | Filetype::Cpp => vec![
+                (r"(?m)^(?:[\w\*]+\s+)+(\w+)\s*\([^)]*\)\s*\{", SymbolKind::Function),
+            ],
+            _ => vec![],
+        };
         
         for (pattern, kind) in patterns {
             if let Ok(re) = Regex::new(pattern) {
                 for cap in re.captures_iter(content) {
                     if let Some(name) = cap.get(1) {
                         let line = content[..name.start()].matches('\n').count();
-                        symbols.push(Symbol { 
-                            name: name.as_str().to_string(), 
-                            kind: kind.clone(), 
-                            line, 
-                            collapsible: matches!(kind, SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Impl),
-                            children: vec![],
-                        });
+                        symbols.push(Symbol { name: name.as_str().to_string(), kind: kind.clone(), line });
                     }
                 }
             }
         }
+        
         symbols.sort_by_key(|s| s.line);
         symbols
     }
-
-    fn parse_c(content: &str) -> Vec<Symbol> {
-        let mut symbols = Vec::new();
-        let re = Regex::new(r"(?m)^(?:[\w\*]+\s+)+(\w+)\s*\([^)]*\)\s*\{").unwrap();
-        for cap in re.captures_iter(content) {
-            if let Some(name) = cap.get(1) {
-                let name_str = name.as_str();
-                if !["if", "else", "while", "for", "switch"].contains(&name_str) {
-                    let line = content[..name.start()].matches('\n').count();
-                    symbols.push(Symbol { name: name_str.to_string(), kind: SymbolKind::Function, line, collapsible: true, children: vec![] });
-                }
-            }
-        }
-        symbols.sort_by_key(|s| s.line);
-        symbols
-    }
-
-    fn parse_python(content: &str) -> Vec<Symbol> {
-        let mut symbols = Vec::new();
-        let patterns = [
-            (r"(?m)^class\s+(\w+)", SymbolKind::Class),
-            (r"(?m)^(?:async\s+)?def\s+(\w+)", SymbolKind::Function),
-        ];
-        for (pattern, kind) in patterns {
-            if let Ok(re) = Regex::new(pattern) {
-                for cap in re.captures_iter(content) {
-                    if let Some(name) = cap.get(1) {
-                        let line = content[..name.start()].matches('\n').count();
-                        symbols.push(Symbol { name: name.as_str().to_string(), kind: kind.clone(), line, collapsible: true, children: vec![] });
-                    }
-                }
-            }
-        }
-        symbols.sort_by_key(|s| s.line);
-        symbols
-    }
-
-    fn parse_js(content: &str) -> Vec<Symbol> {
-        let mut symbols = Vec::new();
-        let patterns = [
-            (r"(?m)^(?:export\s+)?class\s+(\w+)", SymbolKind::Class),
-            (r"(?m)^(?:export\s+)?function\s+(\w+)", SymbolKind::Function),
-            (r"(?m)^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(", SymbolKind::Function),
-        ];
-        for (pattern, kind) in patterns {
-            if let Ok(re) = Regex::new(pattern) {
-                for cap in re.captures_iter(content) {
-                    if let Some(name) = cap.get(1) {
-                        let line = content[..name.start()].matches('\n').count();
-                        symbols.push(Symbol { name: name.as_str().to_string(), kind: kind.clone(), line, collapsible: true, children: vec![] });
-                    }
-                }
-            }
-        }
-        symbols.sort_by_key(|s| s.line);
-        symbols
+    
+    pub fn get_names(symbols: &[Symbol]) -> Vec<String> {
+        symbols.iter().map(|s| s.name.clone()).collect()
     }
 }
 
@@ -566,100 +792,80 @@ impl FindReplace {
 }
 
 // ============================================================================
-// BUILD COMMANDS
+// BUILD SYSTEM
 // ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct BuildCommand {
     pub name: String,
     pub command: String,
-    pub working_dir: Option<String>,
     pub shortcut: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BuildSystem {
-    pub commands: Vec<Vec<BuildCommand>>,
-}
+pub struct BuildSystem;
 
 impl BuildSystem {
-    pub fn new() -> Self {
-        Self {
-            commands: vec![
-                vec![
-                    BuildCommand { name: "Compile".to_string(), command: "rustc \"{file}\" -o \"{file_basename}\"".to_string(), working_dir: None, shortcut: Some("F8".to_string()) },
-                    BuildCommand { name: "Run".to_string(), command: "\"./{file_basename}\"".to_string(), working_dir: None, shortcut: Some("F9".to_string()) },
-                    BuildCommand { name: "Cargo Build".to_string(), command: "cargo build".to_string(), working_dir: Some("{project_dir}".to_string()), shortcut: Some("F10".to_string()) },
-                    BuildCommand { name: "Cargo Run".to_string(), command: "cargo run".to_string(), working_dir: Some("{project_dir}".to_string()), shortcut: Some("F11".to_string()) },
-                ],
-                vec![
-                    BuildCommand { name: "Compile".to_string(), command: "gcc \"{file}\" -o \"{file_basename}\" -Wall".to_string(), working_dir: None, shortcut: Some("F8".to_string()) },
-                    BuildCommand { name: "Run".to_string(), command: "\"./{file_basename}\"".to_string(), working_dir: None, shortcut: Some("F9".to_string()) },
-                ],
-                vec![
-                    BuildCommand { name: "Run".to_string(), command: "python3 \"{file}\"".to_string(), working_dir: None, shortcut: Some("F9".to_string()) },
-                ],
-                vec![
-                    BuildCommand { name: "Run".to_string(), command: "node \"{file}\"".to_string(), working_dir: None, shortcut: Some("F9".to_string()) },
-                ],
-                vec![
-                    BuildCommand { name: "Open".to_string(), command: "xdg-open \"{file}\" 2>/dev/null || open \"{file}\" 2>/dev/null".to_string(), working_dir: None, shortcut: Some("F9".to_string()) },
-                ],
+    pub fn get_commands(filetype: Filetype) -> Vec<BuildCommand> {
+        match filetype {
+            Filetype::Rust => vec![
+                BuildCommand { name: "Cargo Build".to_string(), command: "cargo build".to_string(), shortcut: Some("F8".to_string()) },
+                BuildCommand { name: "Cargo Run".to_string(), command: "cargo run".to_string(), shortcut: Some("F9".to_string()) },
+                BuildCommand { name: "Cargo Check".to_string(), command: "cargo check".to_string(), shortcut: Some("F10".to_string()) },
             ],
+            Filetype::C | Filetype::Cpp => vec![
+                BuildCommand { name: "Compile".to_string(), command: "gcc \"{file}\" -o \"{name}\" -Wall".to_string(), shortcut: Some("F8".to_string()) },
+                BuildCommand { name: "Run".to_string(), command: "\"./{name}\"".to_string(), shortcut: Some("F9".to_string()) },
+                BuildCommand { name: "Make".to_string(), command: "make".to_string(), shortcut: Some("F10".to_string()) },
+            ],
+            Filetype::Python => vec![
+                BuildCommand { name: "Run".to_string(), command: "python3 \"{file}\"".to_string(), shortcut: Some("F9".to_string()) },
+            ],
+            Filetype::JavaScript => vec![
+                BuildCommand { name: "Run".to_string(), command: "node \"{file}\"".to_string(), shortcut: Some("F9".to_string()) },
+            ],
+            Filetype::Html => vec![
+                BuildCommand { name: "Open".to_string(), command: "xdg-open \"{file}\"".to_string(), shortcut: Some("F9".to_string()) },
+            ],
+            _ => vec![],
         }
     }
 
-    pub fn get_commands_for(&self, filetype: Filetype) -> &[BuildCommand] {
-        let index = match filetype {
-            Filetype::Rust => 0, Filetype::C | Filetype::Cpp => 1,
-            Filetype::Python => 2, Filetype::JavaScript | Filetype::TypeScript => 3,
-            Filetype::Html | Filetype::Css | Filetype::Json | Filetype::Markdown => 4,
-            _ => 0,
-        };
-        &self.commands[index]
-    }
-
-    pub fn expand_variables(&self, command: &str, file_path: &Option<String>) -> String {
-        let mut result = command.to_string();
+    pub fn expand(&self, cmd: &str, file_path: &Option<String>) -> String {
+        let mut result = cmd.to_string();
         if let Some(path) = file_path {
-            let path_obj = std::path::Path::new(path);
+            let p = std::path::Path::new(path);
             result = result.replace("{file}", path);
-            result = result.replace("{file_basename}", &path_obj.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-            result = result.replace("{project_dir}", &path_obj.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
+            result = result.replace("{name}", &p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+            result = result.replace("{dir}", &p.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
         }
         result
     }
 
-    pub fn execute_command(&mut self, cmd: &BuildCommand, file_path: &Option<String>, app: &mut GeanyApp) {
-        let expanded = self.expand_variables(&cmd.command, file_path);
-        let working_dir = cmd.working_dir.as_ref().map(|d| self.expand_variables(d, file_path));
-        app.log(format!("> {}", expanded));
+    pub fn execute(cmd: &str, app: &mut GeanyApp) {
+        app.log(format!("> {}", cmd));
         
         #[cfg(target_os = "windows")]
-        let (shell, shell_arg) = ("cmd", "/C");
+        let (shell, arg) = ("cmd", "/C");
         #[cfg(not(target_os = "windows"))]
-        let (shell, shell_arg) = ("sh", "-c");
+        let (shell, arg) = ("sh", "-c");
 
-        match Command::new(shell).arg(shell_arg).arg(&expanded)
-            .current_dir(working_dir.as_deref().unwrap_or("."))
-            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
-        {
+        match Command::new(shell).arg(arg).arg(cmd).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(mut child) => {
                 use std::io::Read;
-                if let Some(mut stdout) = child.stdout.take() {
-                    let mut output = String::new();
-                    if stdout.read_to_string(&mut output).is_ok() && !output.is_empty() {
-                        for line in output.lines().take(100) { app.log(line.to_string()); }
+                if let Some(mut out) = child.stdout.take() {
+                    let mut s = String::new();
+                    if out.read_to_string(&mut s).is_ok() && !s.is_empty() {
+                        for line in s.lines().take(50) { app.log(line.to_string()); }
                     }
                 }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let mut output = String::new();
-                    if stderr.read_to_string(&mut output).is_ok() && !output.is_empty() {
-                        for line in output.lines().take(100) { app.log(format!("[err] {}", line)); }
+                if let Some(mut err) = child.stderr.take() {
+                    let mut s = String::new();
+                    if err.read_to_string(&mut s).is_ok() && !s.is_empty() {
+                        for line in s.lines().take(50) { app.log(format!("[err] {}", line)); }
                     }
                 }
                 if let Ok(status) = child.wait() {
-                    app.log(if status.success() { "✓ Build succeeded".to_string() } else { format!("✗ Exit code: {:?}", status.code()) });
+                    app.log(if status.success() { "✓ Success".to_string() } else { format!("✗ Exit: {:?}", status.code()) });
                 }
             }
             Err(e) => { app.log(format!("Error: {}", e)); }
@@ -680,53 +886,42 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new() -> Self {
-        let username = whoami::username();
         let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-        Self {
-            visible: false,
-            history: vec!["Geany-Rs Terminal v0.3.0".to_string(), "Type 'help' for commands".to_string(), "─".repeat(40)],
-            current_dir: home,
-            command_input: String::new(),
-        }
+        Self { visible: false, history: vec!["Geany-Rs Terminal v0.4.0".to_string(), "Type 'help' for commands".to_string()], current_dir: home, command_input: String::new() }
     }
 
-    pub fn execute(&mut self, command: &str, app: &mut GeanyApp) {
-        if command.trim().is_empty() { return; }
-        self.history.push(format!("{} $ {}", self.current_dir.replace(&*whoami::username(), "~"), command));
+    pub fn execute(&mut self, cmd: &str, app: &mut GeanyApp) {
+        if cmd.trim().is_empty() { return; }
+        self.history.push(format!("$ {}", cmd));
         
-        match command.trim() {
-            "help" => { self.history.push("Commands: help, clear, pwd, cd, ls, cat, mkdir, touch, rm, echo, date, whoami".to_string()); }
+        match cmd.trim() {
+            "help" => { self.history.push("Commands: help, clear, pwd, cd, ls, cat, mkdir, touch, rm, echo".to_string()); }
             "clear" => { self.history.clear(); }
-            "pwd" => { self.history.push(self.current_dir.replace(&*whoami::username(), "~")); }
-            "date" => { let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap(); self.history.push(format!("Epoch: {} seconds", now.as_secs())); }
+            "pwd" => { self.history.push(self.current_dir.clone()); }
             "whoami" => { self.history.push(whoami::username()); }
             cmd if cmd.starts_with("cd ") => {
-                let dir = cmd.trim_start_matches("cd ").trim().replace('~', &*whoami::username());
-                let new_dir = if dir.starts_with('/') { dir.clone() } else { format!("{}/{}", self.current_dir, dir) };
-                if let Ok(canonical) = std::fs::canonicalize(&new_dir) {
-                    self.current_dir = canonical.to_string_lossy().to_string();
-                } else {
-                    self.history.push(format!("cd: {}: No such directory", dir));
-                }
+                let dir = cmd.trim_start_matches("cd ").replace('~', &whoami::username());
+                if let Ok(p) = std::fs::canonicalize(&dir) { self.current_dir = p.to_string_lossy().to_string(); }
+                else { self.history.push(format!("cd: {} not found", dir)); }
             }
-            "ls" => { if let Ok(entries) = std::fs::read_dir(&self.current_dir) { for entry in entries.filter_map(|e| e.ok()) { let name = entry.file_name().to_string_lossy().to_string(); let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false); self.history.push(format!("{} {}", if is_dir { "📁" } else { "📄" }, name)); } } }
-            cmd if cmd.starts_with("cat ") => { let file = cmd.trim_start_matches("cat "); match std::fs::read_to_string(file) { Ok(c) => { for l in c.lines().take(50) { self.history.push(l.to_string()); } } Err(_) => { self.history.push(format!("cat: {}: Not found", file)); } } }
+            "ls" => { if let Ok(e) = std::fs::read_dir(&self.current_dir) { for x in e.filter_map(|e| e.ok()) { self.history.push(x.file_name().to_string_lossy().to_string()); } } }
+            cmd if cmd.starts_with("cat ") => { if let Ok(c) = std::fs::read_to_string(cmd.trim_start_matches("cat ")) { for l in c.lines().take(30) { self.history.push(l.to_string()); } } }
+            cmd if cmd.starts_with("mkdir ") => { let _ = std::fs::create_dir_all(cmd.trim_start_matches("mkdir ")); }
+            cmd if cmd.starts_with("touch ") => { let _ = std::fs::write(cmd.trim_start_matches("touch "), ""); }
+            cmd if cmd.starts_with("rm ") => { let _ = std::fs::remove_file(cmd.trim_start_matches("rm ")); }
             cmd if cmd.starts_with("echo ") => { self.history.push(cmd.trim_start_matches("echo ").to_string()); }
-            cmd if cmd.starts_with("mkdir ") => { match std::fs::create_dir_all(cmd.trim_start_matches("mkdir ")) { Ok(_) => self.history.push("Created".to_string()), Err(e) => self.history.push(format!("Error: {}", e)) } }
-            cmd if cmd.starts_with("touch ") => { match std::fs::write(cmd.trim_start_matches("touch "), "") { Ok(_) => self.history.push("Created".to_string()), Err(e) => self.history.push(format!("Error: {}", e)) } }
-            cmd if cmd.starts_with("rm ") => { match std::fs::remove_file(cmd.trim_start_matches("rm ")) { Ok(_) => self.history.push("Removed".to_string()), Err(e) => self.history.push(format!("Error: {}", e)) } }
             _ => {
                 #[cfg(target_os = "windows")]
                 let (shell, arg) = ("cmd", "/C");
                 #[cfg(not(target_os = "windows"))]
                 let (shell, arg) = ("sh", "-c");
-                if let Ok(output) = Command::new(shell).arg(arg).arg(command).current_dir(&self.current_dir).output() {
-                    if !output.stdout.is_empty() { for l in String::from_utf8_lossy(&output.stdout).lines().take(50) { self.history.push(l.to_string()); } }
-                    if !output.stderr.is_empty() { for l in String::from_utf8_lossy(&output.stderr).lines().take(50) { self.history.push(format!("[err] {}", l)); } }
+                if let Ok(out) = Command::new(shell).arg(arg).arg(cmd).current_dir(&self.current_dir).output() {
+                    if !out.stdout.is_empty() { for l in String::from_utf8_lossy(&out.stdout).lines().take(30) { self.history.push(l.to_string()); } }
+                    if !out.stderr.is_empty() { for l in String::from_utf8_lossy(&out.stderr).lines().take(30) { self.history.push(format!("[err] {}", l)); } }
                 }
             }
         }
-        if self.history.len() > 500 { self.history = self.history.split_off(self.history.len() - 500); }
+        if self.history.len() > 200 { self.history = self.history.split_off(self.history.len() - 200); }
     }
 }
 
@@ -735,9 +930,7 @@ impl Terminal {
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Filetype {
-    PlainText, C, Cpp, Rust, Python, JavaScript, TypeScript, Html, Css, Json, Markdown, Yaml, Toml, Go, Java, Php, Sql, Shell,
-}
+pub enum Filetype { PlainText, C, Cpp, Rust, Python, JavaScript, TypeScript, Html, Css, Json, Markdown, Yaml, Toml, Go, Java, Php, Sql, Shell }
 
 impl Filetype {
     pub fn from_extension(ext: &str) -> Self {
@@ -746,11 +939,11 @@ impl Filetype {
             "rs" => Filetype::Rust, "py" => Filetype::Python,
             "js" | "mjs" => Filetype::JavaScript, "ts" | "tsx" => Filetype::TypeScript,
             "html" | "htm" => Filetype::Html, "css" => Filetype::Css,
-            "json" => Filetype::Json, "md" | "markdown" => Filetype::Markdown,
+            "json" => Filetype::Json, "md" => Filetype::Markdown,
             "yaml" | "yml" => Filetype::Yaml, "toml" => Filetype::Toml,
             "go" => Filetype::Go, "java" => Filetype::Java,
             "php" => Filetype::Php, "sql" => Filetype::Sql,
-            "sh" | "bash" | "zsh" => Filetype::Shell, _ => Filetype::PlainText,
+            "sh" | "bash" => Filetype::Shell, _ => Filetype::PlainText,
         }
     }
 
@@ -770,7 +963,7 @@ impl Filetype {
 // DOCUMENT
 // ============================================================================
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Document {
     pub id: usize,
     pub name: String,
@@ -780,78 +973,18 @@ pub struct Document {
     pub modified: bool,
     pub cursor_line: usize,
     pub cursor_col: usize,
-    pub encoding: String,
-    pub eol: String,
-    pub fold_state: FoldState,
-    pub multi_cursor: MultiCursorState,
-    pub bracket_match: Option<BracketMatch>,
 }
 
 impl Document {
     pub fn new(id: usize) -> Self {
-        Self { id, name: format!("untitled_{}", id), path: None, content: String::new(), filetype: Filetype::PlainText, modified: false, cursor_line: 1, cursor_col: 1, encoding: "UTF-8".to_string(), eol: "\n".to_string(), fold_state: FoldState::new(), multi_cursor: MultiCursorState::new(), bracket_match: None }
+        Self { id, name: format!("untitled_{}", id), path: None, content: String::new(), filetype: Filetype::PlainText, modified: false, cursor_line: 1, cursor_col: 1 }
     }
 
     pub fn from_file(path: &str, content: String) -> Self {
-        let path_obj = std::path::Path::new(path);
-        let name = path_obj.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
-        let ext = path_obj.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let mut doc = Self { id: 0, name, path: Some(path.to_string()), content: content.clone(), filetype: Filetype::from_extension(&ext), modified: false, cursor_line: 1, cursor_col: 1, encoding: "UTF-8".to_string(), eol: if content.contains("\r\n") { "\r\n".to_string() } else { "\n".to_string() }, fold_state: FoldState::new(), multi_cursor: MultiCursorState::new(), bracket_match: None };
-        doc.fold_state.parse_folds(&doc.content);
-        doc
-    }
-
-    pub fn update_bracket_match(&mut self) {
-        // Find position from cursor
-        let pos = self.position_from_line_col();
-        self.bracket_match = BracketMatcher::find_bracket_at_cursor(&self.content, pos)
-            .and_then(|p| BracketMatcher::find_match(&self.content, p));
-    }
-
-    pub fn position_from_line_col(&self) -> usize {
-        let lines: Vec<&str> = self.content.lines().collect();
-        let mut pos = 0;
-        for (i, line) in lines.iter().enumerate() {
-            if i + 1 == self.cursor_line {
-                return pos + self.cursor_col.min(line.len());
-            }
-            pos += line.len() + 1; // +1 for newline
-        }
-        pos
-    }
-
-    pub fn line_col_from_position(&self, pos: usize) -> (usize, usize) {
-        let mut current_pos = 0;
-        for (i, line) in self.content.lines().enumerate() {
-            if current_pos + line.len() >= pos {
-                return (i + 1, (pos - current_pos).min(line.len()));
-            }
-            current_pos += line.len() + 1;
-        }
-        (self.content.lines().count().max(1), 0)
-    }
-
-    pub fn insert_at_cursor(&mut self, text: &str, settings: &EditorSettings) {
-        // Handle newline indentation
-        let mut insert_text = text.to_string();
-        if text == "\n" || text == "\r\n" {
-            let line = self.content.lines().nth(self.cursor_line.saturating_sub(1)).unwrap_or("");
-            let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
-            let trimmed = line.trim_start();
-            
-            // Auto-indent after opening brace
-            let extra = if trimmed.ends_with('{') || trimmed.ends_with('(') || trimmed.ends_with('[') {
-                if settings.use_spaces { " ".repeat(settings.indent_width) } else { "\t".to_string() }
-            } else { String::new() };
-            
-            let newline = if self.eol == "\r\n" { "\r\n" } else { "\n" };
-            insert_text = format!("{}{}{}", newline, indent, extra);
-        }
-        
-        let pos = self.position_from_line_col();
-        self.content.insert_str(pos, &insert_text);
-        self.cursor_col += insert_text.matches('\n').count();
-        self.modified = true;
+        let p = std::path::Path::new(path);
+        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+        let ext = p.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        Self { id: 0, name, path: Some(path.to_string()), content, filetype: Filetype::from_extension(&ext), modified: false, cursor_line: 1, cursor_col: 1 }
     }
 }
 
@@ -862,44 +995,48 @@ impl Document {
 pub struct GeanyApp {
     pub documents: Vec<Document>,
     pub active_doc: Option<usize>,
+    pub project: Option<GeanyProject>,
     pub sidebar_visible: bool,
     pub sidebar_tab: SidebarTab,
     pub messages_visible: bool,
     pub messages: Vec<String>,
     pub terminal: Terminal,
-    pub build_system: BuildSystem,
+    pub completer: AutoCompleter,
+    pub macro_manager: MacroManager,
+    pub plugin_manager: PluginManager,
     pub theme_dark: bool,
     pub find_replace: FindReplace,
     pub show_find: bool,
     pub show_goto_line: bool,
-    pub show_settings: bool,
     pub goto_line: String,
     pub settings: EditorSettings,
     pub active_menu: Option<Menu>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SidebarTab { Files, Symbols, }
+pub enum SidebarTab { Files, Symbols, Macros, Plugins }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Menu { File, Edit, View, Search, Build, Tools, Settings, Help }
+pub enum Menu { File, Edit, View, Search, Build, Tools, Macros, Plugins, Project, Help }
 
 impl GeanyApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self {
             documents: vec![Document::new(1)],
             active_doc: Some(0),
+            project: None,
             sidebar_visible: true,
             sidebar_tab: SidebarTab::Files,
             messages_visible: true,
-            messages: vec!["Geany-Rs v0.3.0 initialized".to_string(), "New features: Indentation, Folding, Bracket Matching, Multi-cursor".to_string()],
+            messages: vec!["Geany-Rs v0.4.0".to_string(), "NEW: Project Management, Auto-completion, Macros, Plugin System!".to_string()],
             terminal: Terminal::new(),
-            build_system: BuildSystem::new(),
+            completer: AutoCompleter::new(),
+            macro_manager: MacroManager::new(),
+            plugin_manager: PluginManager::new(),
             theme_dark: true,
             find_replace: FindReplace::new(),
             show_find: false,
             show_goto_line: false,
-            show_settings: false,
             goto_line: String::new(),
             settings: EditorSettings::default(),
             active_menu: None,
@@ -909,20 +1046,19 @@ impl GeanyApp {
             doc.content = include_str!("example.rs").to_string();
             doc.filetype = Filetype::Rust;
             doc.name = "example.rs".to_string();
-            doc.fold_state.parse_folds(&doc.content);
         }
         app
     }
 
-    fn new_document(&mut self) { let id = self.documents.len() + 1; self.documents.push(Document::new(id)); self.active_doc = Some(self.documents.len() - 1); self.log("New document created"); }
-    fn close_document(&mut self, index: usize) { if self.documents.len() > 1 { self.documents.remove(index); if let Some(active) = self.active_doc { if active >= index && active > 0 { self.active_doc = Some(active - 1); } else if active >= self.documents.len() { self.active_doc = Some(self.documents.len() - 1); } } self.log("Document closed"); } }
     fn log(&mut self, msg: impl Into<String>) { self.messages.push(msg.into()); if self.messages.len() > 100 { self.messages.remove(0); } }
+    fn new_doc(&mut self) { let id = self.documents.len() + 1; self.documents.push(Document::new(id)); self.active_doc = Some(self.documents.len() - 1); self.log("New document"); }
+    fn close_doc(&mut self, idx: usize) { if self.documents.len() > 1 { self.documents.remove(idx); if let Some(a) = self.active_doc { if a >= idx && a > 0 { self.active_doc = Some(a - 1); } else if a >= self.documents.len() { self.active_doc = Some(self.documents.len() - 1); } } self.log("Closed"); } }
 
     fn open_file(&mut self) {
         if let Some(path) = file_dialogs::open_file() {
             let path_str = path.to_string_lossy().to_string();
             match std::fs::read_to_string(&path_str) {
-                Ok(content) => { let mut doc = Document::from_file(&path_str, content); doc.id = self.documents.len() + 1; self.documents.push(doc); self.active_doc = Some(self.documents.len() - 1); self.log(format!("Opened: {}", path_str)); }
+                Ok(c) => { let mut d = Document::from_file(&path_str, c); d.id = self.documents.len() + 1; self.documents.push(d); self.active_doc = Some(self.documents.len() - 1); self.log(format!("Opened: {}", path_str)); }
                 Err(e) => { self.log(format!("Error: {}", e)); }
             }
         }
@@ -931,8 +1067,8 @@ impl GeanyApp {
     fn save_file(&mut self) {
         if let Some(idx) = self.active_doc {
             let doc = &mut self.documents[idx];
-            let default_name = doc.path.as_ref().map(|p| std::path::Path::new(p).file_name().unwrap().to_string_lossy().to_string()).unwrap_or_else(|| doc.name.clone());
-            if let Some(path) = file_dialogs::save_file(&default_name) {
+            let name = doc.path.as_ref().map(|p| std::path::Path::new(p).file_name().unwrap().to_string_lossy().to_string()).unwrap_or_else(|| doc.name.clone());
+            if let Some(path) = file_dialogs::save_file(&name) {
                 let path_str = path.to_string_lossy().to_string();
                 match std::fs::write(&path_str, &doc.content) {
                     Ok(_) => { doc.path = Some(path_str.clone()); doc.modified = false; doc.name = std::path::Path::new(&path_str).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); self.log(format!("Saved: {}", path_str)); }
@@ -942,37 +1078,68 @@ impl GeanyApp {
         }
     }
 
-    fn build_current(&mut self) {
-        if let Some(idx) = self.active_doc {
-            let doc = &self.documents[idx];
-            if let Some(cmd) = self.build_system.get_commands_for(doc.filetype).first() {
-                self.build_system.execute_command(cmd, &doc.path, self);
+    // ===== PROJECT MANAGEMENT =====
+    fn new_project(&mut self) {
+        self.project = Some(GeanyProject::default());
+        self.log("Created new project");
+    }
+
+    fn save_project(&mut self) {
+        if let Some(ref project) = self.project {
+            if let Some(path) = file_dialogs::save_project() {
+                let path_str = path.to_string_lossy().to_string();
+                match project.save(&path_str) {
+                    Ok(_) => self.log(format!("Project saved: {}", path_str)),
+                    Err(e) => self.log(format!("Error saving project: {}", e)),
+                }
+            }
+        } else {
+            self.log("No project open");
+        }
+    }
+
+    fn open_project(&mut self) {
+        let path = rfd::FileDialog::new().add_filter("Geany Project", &["geany"]).pick_file();
+        if let Some(path) = path {
+            let path_str = path.to_string_lossy().to_string();
+            match GeanyProject::load(&path_str) {
+                Ok(project) => { self.project = Some(project); self.log(format!("Opened project: {}", path_str)); }
+                Err(e) => { self.log(format!("Error loading project: {}", e)); }
             }
         }
     }
 
-    fn run_current(&mut self) {
-        if let Some(idx) = self.active_doc {
-            let doc = &self.documents[idx];
-            let cmds = self.build_system.get_commands_for(doc.filetype);
-            if cmds.len() > 1 {
-                self.build_system.execute_command(&cmds[1], &doc.path, self);
-            } else if let Some(cmd) = cmds.first() {
-                self.build_system.execute_command(cmd, &doc.path, self);
-            }
+    fn close_project(&mut self) {
+        self.project = None;
+        self.log("Project closed");
+    }
+
+    // ===== MACROS =====
+    fn start_macro_recording(&mut self) {
+        self.macro_manager.start_recording();
+        self.log("Recording macro... (Press Ctrl+Shift+E to stop)");
+    }
+
+    fn stop_macro_recording(&mut self) {
+        if let Some(m) = self.macro_manager.stop_recording() {
+            self.log(format!("Macro saved: {} ({} actions)", m.name, m.actions.len()));
+        } else {
+            self.log("No macro recorded");
         }
     }
 
-    fn goto_line(&mut self) {
-        if let Ok(line) = self.goto_line.parse::<usize>() {
+    fn execute_last_macro(&mut self) {
+        if let Some(m) = self.macro_manager.saved_macros.last() {
             if let Some(idx) = self.active_doc {
                 let doc = &mut self.documents[idx];
-                doc.cursor_line = line.min(doc.content.lines().count().max(1));
-                self.log(format!("Jumped to line {}", doc.cursor_line));
+                let (new_content, new_pos) = self.macro_manager.execute_macro(&doc.content, doc.content.len().min(100));
+                doc.content = new_content;
+                doc.modified = true;
+                self.log(format!("Executed macro: {}", m.name));
             }
+        } else {
+            self.log("No macros saved");
         }
-        self.show_goto_line = false;
-        self.goto_line.clear();
     }
 }
 
@@ -983,174 +1150,187 @@ impl GeanyApp {
 fn render_menu(app: &mut GeanyApp, ui: &mut Ui, menu_type: Menu) {
     match menu_type {
         Menu::File => {
-            if ui.button("📄 New          Ctrl+N").clicked() { app.new_document(); app.active_menu = None; }
-            if ui.button("📂 Open         Ctrl+O").clicked() { app.open_file(); app.active_menu = None; }
+            if ui.button("📄 New              Ctrl+N").clicked() { app.new_doc(); app.active_menu = None; }
+            if ui.button("📂 Open File       Ctrl+O").clicked() { app.open_file(); app.active_menu = None; }
+            if ui.button("📂 Open Project").clicked() { app.open_project(); app.active_menu = None; }
             ui.separator();
-            if ui.button("💾 Save         Ctrl+S").clicked() { app.save_file(); app.active_menu = None; }
+            if ui.button("💾 Save             Ctrl+S").clicked() { app.save_file(); app.active_menu = None; }
             if ui.button("💾 Save As").clicked() { app.save_file(); app.active_menu = None; }
             ui.separator();
-            if ui.button("✕ Close        Ctrl+W").clicked() { if let Some(idx) = app.active_doc { app.close_document(idx); } app.active_menu = None; }
+            if ui.button("✕ Close            Ctrl+W").clicked() { if let Some(idx) = app.active_doc { app.close_doc(idx); } app.active_menu = None; }
+        }
+        Menu::Project => {
+            if ui.button("📁 New Project").clicked() { app.new_project(); app.active_menu = None; }
+            if ui.button("💾 Save Project").clicked() { app.save_project(); app.active_menu = None; }
+            if ui.button("📂 Open Project").clicked() { app.open_project(); app.active_menu = None; }
             ui.separator();
-            if ui.button("🚪 Quit").clicked() { std::process::exit(0); }
+            if ui.button("✕ Close Project").clicked() { app.close_project(); app.active_menu = None; }
+            ui.separator();
+            if let Some(ref p) = app.project {
+                ui.label(RichText::new(format!("Current: {}", p.name)).strong());
+            } else {
+                ui.label("No project open");
+            }
         }
         Menu::Edit => {
             if ui.button("↩ Undo").clicked() { app.log("Undo"); app.active_menu = None; }
             if ui.button("↪ Redo").clicked() { app.log("Redo"); app.active_menu = None; }
             ui.separator();
-            if ui.button("✂ Cut          Ctrl+X").clicked() { app.log("Cut"); app.active_menu = None; }
-            if ui.button("📋 Copy        Ctrl+C").clicked() { app.log("Copy"); app.active_menu = None; }
-            if ui.button("📄 Paste       Ctrl+V").clicked() { app.log("Paste"); app.active_menu = None; }
-            ui.separator();
-            if ui.button("Select All    Ctrl+A").clicked() { app.log("Select all"); app.active_menu = None; }
-            ui.separator();
-            if ui.button("📐 Indent       Tab").clicked() { app.log("Indent"); app.active_menu = None; }
-            if ui.button("📑 Unindent   Shift+Tab").clicked() { app.log("Unindent"); app.active_menu = None; }
+            if ui.button("✂ Cut").clicked() { app.log("Cut"); app.active_menu = None; }
+            if ui.button("📋 Copy").clicked() { app.log("Copy"); app.active_menu = None; }
+            if ui.button("📄 Paste").clicked() { app.log("Paste"); app.active_menu = None; }
         }
         Menu::View => {
-            if ui.button(if app.sidebar_visible { "✓ Sidebar" } else { "Sidebar" }).clicked() { app.sidebar_visible = !app.sidebar_visible; app.active_menu = None; }
-            if ui.button(if app.messages_visible { "✓ Messages" } else { "Messages" }).clicked() { app.messages_visible = !app.messages_visible; app.active_menu = None; }
-            if ui.button(if app.terminal.visible { "✓ Terminal" } else { "Terminal" }).clicked() { app.terminal.visible = !app.terminal.visible; app.active_menu = None; }
+            if ui.button(if app.sidebar_visible { "✓ Sidebar" } else { "Sidebar" }).clicked() { app.sidebar_visible = !app.sidebar_visible; }
+            if ui.button(if app.messages_visible { "✓ Messages" } else { "Messages" }).clicked() { app.messages_visible = !app.messages_visible; }
+            if ui.button(if app.terminal.visible { "✓ Terminal" } else { "Terminal" }).clicked() { app.terminal.visible = !app.terminal.visible; }
             ui.separator();
-            if ui.button(if app.theme_dark { "☀️ Light Theme" } else { "🌙 Dark Theme" }).clicked() { app.theme_dark = !app.theme_dark; app.active_menu = None; }
+            if ui.button(if app.theme_dark { "☀️ Light" } else { "🌙 Dark" }).clicked() { app.theme_dark = !app.theme_dark; app.active_menu = None; }
         }
         Menu::Search => {
-            if ui.button("🔍 Find        Ctrl+F").clicked() { app.show_find = !app.show_find; app.active_menu = None; }
-            if ui.button("📍 Go to Line  Ctrl+G").clicked() { app.show_goto_line = true; app.active_menu = None; }
-            if ui.button("🔁 Find Next   F3").clicked() { app.log("Find next"); app.active_menu = None; }
-            if ui.button("🔁 Find Prev   Shift+F3").clicked() { app.log("Find previous"); app.active_menu = None; }
+            if ui.button("🔍 Find            Ctrl+F").clicked() { app.show_find = !app.show_find; app.active_menu = None; }
+            if ui.button("📍 Go to Line     Ctrl+G").clicked() { app.show_goto_line = true; app.active_menu = None; }
         }
         Menu::Build => {
-            if ui.button("🔨 Compile        F8").clicked() { app.build_current(); app.active_menu = None; }
-            if ui.button("▶ Run             F9").clicked() { app.run_current(); app.active_menu = None; }
-            ui.separator();
-            if ui.button("📂 Build Commands").clicked() { app.log("Build menu"); app.active_menu = None; }
+            if let Some(idx) = app.active_doc {
+                let doc = &app.documents[idx];
+                let cmds = BuildSystem::get_commands(doc.filetype);
+                for cmd in cmds {
+                    if ui.button(format!("🔨 {}", cmd.name)).clicked() {
+                        let expanded = BuildSystem.expand(&BuildSystem, &cmd.command, &doc.path);
+                        BuildSystem::execute(&expanded, app);
+                        app.active_menu = None;
+                    }
+                }
+            }
         }
         Menu::Tools => {
             if ui.button("🖥 Terminal").clicked() { app.terminal.visible = !app.terminal.visible; app.active_menu = None; }
+            if ui.button(if app.completer.enabled { "✓ Auto-complete" } else { "Auto-complete" }).clicked() { app.completer.enabled = !app.completer.enabled; }
         }
-        Menu::Settings => {
-            if ui.button(if app.settings.word_wrap { "✓ Word Wrap" } else { "Word Wrap" }).clicked() { app.settings.word_wrap = !app.settings.word_wrap; }
-            if ui.button(if app.settings.show_line_numbers { "✓ Line Numbers" } else { "Line Numbers" }).clicked() { app.settings.show_line_numbers = !app.settings.show_line_numbers; }
-            if ui.button(if app.settings.highlight_current_line { "✓ Highlight Line" } else { "Highlight Line" }).clicked() { app.settings.highlight_current_line = !app.settings.highlight_current_line; }
-            if ui.button(if app.settings.bracket_highlight { "✓ Bracket Match" } else { "Bracket Match" }).clicked() { app.settings.bracket_highlight = !app.settings.bracket_highlight; }
+        Menu::Macros => {
+            if ui.button(if app.macro_manager.is_recording { "⏹ Stop Recording" } else { "⏺ Start Recording" }).clicked() {
+                if app.macro_manager.is_recording { app.stop_macro_recording(); } else { app.start_macro_recording(); }
+            }
+            if ui.button("▶ Play Last Macro").clicked() { app.execute_last_macro(); app.active_menu = None; }
             ui.separator();
-            if ui.button("⚙ Editor Settings...").clicked() { app.show_settings = true; app.active_menu = None; }
+            ui.label("Saved Macros:");
+            for (i, m) in app.macro_manager.saved_macros.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button(format!("▶ {}", m.name)).clicked() {
+                        if let Some(idx) = app.active_doc {
+                            let doc = &mut app.documents[idx];
+                            let (c, _) = app.macro_manager.execute_macro(&doc.content, 0);
+                            doc.content = c;
+                            doc.modified = true;
+                        }
+                    }
+                    if ui.button("🗑").clicked() { app.macro_manager.delete_macro(i); }
+                });
+            }
+            if app.macro_manager.is_recording {
+                ui.separator();
+                ui.label(RichText::new("⏺ Recording...").color(Color32::KHAKI));
+            }
+        }
+        Menu::Plugins => {
+            ui.label("Available Plugins:");
+            for (i, plugin) in app.plugin_manager.plugins.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let checked = plugin.enabled;
+                    if ui.checkbox(&mut app.plugin_manager.plugins[i].enabled, &plugin.info.name).changed() {
+                        app.log(format!("Plugin '{}' {}", plugin.info.name, if plugin.enabled { "enabled" } else { "disabled" }));
+                    }
+                });
+                ui.label(RichText::new(&plugin.info.description).small().color(Color32::GRAY));
+            }
+            if ui.button("🔌 Plugin Manager").clicked() { app.plugin_manager.show_plugin_dialog = true; app.active_menu = None; }
         }
         Menu::Help => {
-            if ui.button("⌨ Shortcuts").clicked() { app.log("Ctrl+N/O/S/F/G/W | F8/F9 | Tab/Shift+Tab"); app.active_menu = None; }
-            if ui.button("ℹ About").clicked() { app.log("Geany-Rs v0.3.0 - Built with Rust + egui"); app.active_menu = None; }
+            if ui.button("⌨ Keyboard Shortcuts").clicked() { app.log("Ctrl+N/O/S/F/G/W | F8/F9 | Ctrl+Shift+R/E for macros"); app.active_menu = None; }
+            if ui.button("ℹ About").clicked() { app.log("Geany-Rs v0.4.0 - Built with Rust + egui"); app.active_menu = None; }
         }
     }
 }
 
 // ============================================================================
-// SETTINGS DIALOG
-// ============================================================================
-
-fn render_settings_dialog(app: &mut GeanyApp, ctx: &egui::Context) {
-    Window::new("Editor Settings").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-        ui.heading("Indentation");
-        ui.horizontal(|ui| {
-            ui.label("Tab size:");
-            egui::ComboBox::from_id_salt("tab_size").selected_text(app.settings.tab_size.to_string()).show_ui(ui, |ui| {
-                for size in [2, 4, 8] { ui.selectable_value(&mut app.settings.tab_size, size, size.to_string()); }
-            });
-        });
-        ui.checkbox(&mut app.settings.use_spaces, "Insert spaces instead of tabs");
-        ui.add(egui::Slider::new(&mut app.settings.indent_width, 2..=8).text("Indent width"));
-        ui.checkbox(&mut app.settings.auto_indent, "Auto-indent");
-        
-        ui.separator();
-        ui.heading("Display");
-        ui.checkbox(&mut app.settings.show_line_numbers, "Show line numbers");
-        ui.checkbox(&mut app.settings.show_whitespace, "Show whitespace");
-        ui.checkbox(&mut app.settings.highlight_current_line, "Highlight current line");
-        ui.checkbox(&mut app.settings.bracket_highlight, "Bracket matching");
-        
-        ui.separator();
-        ui.heading("Word Wrap");
-        ui.checkbox(&mut app.settings.word_wrap, "Enable word wrap");
-        if app.settings.word_wrap {
-            ui.add(egui::Slider::new(&mut app.settings.wrap_width, 60..=200).text("Wrap width"));
-        }
-        
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("OK").clicked() { app.show_settings = false; }
-            if ui.button("Apply").clicked() { app.log("Settings applied"); }
-            if ui.button("Cancel").clicked() { app.show_settings = false; }
-        });
-    });
-}
-
-// ============================================================================
-// MAIN UPDATE LOOP
+// MAIN UPDATE
 // ============================================================================
 
 impl eframe::App for GeanyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts
-        let shortcuts = ctx.input(|i| i.modifiers);
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) { self.new_document(); }
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) { self.open_file(); }
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) { self.save_file(); }
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::F)) { self.show_find = !self.show_find; }
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::G)) { self.show_goto_line = true; }
-        if shortcuts.cmd && ctx.input(|i| i.key_pressed(egui::Key::W)) { if let Some(idx) = self.active_doc { self.close_document(idx); } }
-        if ctx.input(|i| i.key_pressed(egui::Key::F8)) { self.build_current(); }
-        if ctx.input(|i| i.key_pressed(egui::Key::F9)) { self.run_current(); }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { self.show_find = false; self.show_goto_line = false; self.show_settings = false; self.active_menu = None; }
+        let mods = ctx.input(|i| i.modifiers);
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) { self.new_doc(); }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) { self.open_file(); }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) { self.save_file(); }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::F)) { self.show_find = !self.show_find; }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::G)) { self.show_goto_line = true; }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::W)) { if let Some(idx) = self.active_doc { self.close_doc(idx); } }
+        if mods.cmd && ctx.input(|i| i.key_pressed(egui::Key::Space)) && !self.macro_manager.is_recording {
+            // Trigger auto-complete
+            if let Some(idx) = self.active_doc {
+                let doc = &self.documents[idx];
+                let symbols = SymbolParser::parse(&doc.content, doc.filetype);
+                self.completer.trigger(&doc.content, doc.content.len(), doc.filetype, &SymbolParser::get_names(&symbols));
+            }
+        }
+        // Macro recording shortcut: Ctrl+Shift+R
+        if mods.cmd && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            if self.macro_manager.is_recording { self.stop_macro_recording(); } else { self.start_macro_recording(); }
+        }
+        // Macro playback shortcut: Ctrl+Shift+E
+        if mods.cmd && mods.shift && ctx.input(|i| i.key_pressed(egui::Key::E)) {
+            self.execute_last_macro();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { self.show_find = false; self.show_goto_line = false; self.active_menu = None; }
 
         ctx.set_visuals(if self.theme_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
 
-        // ===== TOP PANEL =====
+        // TOP PANEL
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            // Menu bar
             ui.horizontal(|ui| {
-                let menus = [("File", Menu::File), ("Edit", Menu::Edit), ("View", Menu::View), ("Search", Menu::Search), ("Build", Menu::Build), ("Tools", Menu::Tools), ("Settings", Menu::Settings), ("Help", Menu::Help)];
-                for (name, menu_type) in menus {
+                let menus = [("File", Menu::File), ("Project", Menu::Project), ("Edit", Menu::Edit), ("View", Menu::View), ("Search", Menu::Search), ("Build", Menu::Build), ("Tools", Menu::Tools), ("Macros", Menu::Macros), ("Plugins", Menu::Plugins), ("Help", Menu::Help)];
+                for (name, m) in menus {
                     let text = RichText::new(name);
-                    if ui.selectable_label(self.active_menu == Some(menu_type), text).clicked() {
-                        self.active_menu = if self.active_menu == Some(menu_type) { None } else { Some(menu_type) };
+                    if ui.selectable_label(self.active_menu == Some(m), text).clicked() {
+                        self.active_menu = if self.active_menu == Some(m) { None } else { Some(m) };
                     }
                 }
             });
             ui.separator();
-            
-            // Quick toolbar
             ui.horizontal(|ui| {
-                if ui.button("📄").on_hover_text("New").clicked() { self.new_document(); }
-                if ui.button("📂").on_hover_text("Open").clicked() { self.open_file(); }
-                if ui.button("💾").on_hover_text("Save").clicked() { self.save_file(); }
-                ui.separator();
-                if ui.button("🔍").on_hover_text("Find").clicked() { self.show_find = !self.show_find; }
-                if ui.button("📍").on_hover_text("Go to Line").clicked() { self.show_goto_line = true; }
-                ui.separator();
-                if ui.button("🔨").on_hover_text("Build").clicked() { self.build_current(); }
-                if ui.button("▶").on_hover_text("Run").clicked() { self.run_current(); }
+                if ui.button("📄").clicked() { self.new_doc(); }
+                if ui.button("📂").clicked() { self.open_file(); }
+                if ui.button("💾").clicked() { self.save_file(); }
                 ui.separator();
                 if ui.toggle_value(&mut self.sidebar_visible, "📑").clicked() {}
                 if ui.toggle_value(&mut self.messages_visible, "📋").clicked() {}
                 if ui.toggle_value(&mut self.terminal.visible, "🖥").clicked() {}
                 ui.separator();
-                if ui.button(if self.theme_dark { "☀️" } else { "🌙" }).on_hover_text("Theme").clicked() { self.theme_dark = !self.theme_dark; }
+                if ui.toggle_value(&mut self.macro_manager.is_recording, "⏺").clicked() { 
+                    if self.macro_manager.is_recording { self.stop_macro_recording(); } else { self.start_macro_recording(); }
+                }
+                if ui.button(if self.theme_dark { "☀️" } else { "🌙" }).clicked() { self.theme_dark = !self.theme_dark; }
             });
         });
 
-        // ===== MENU DROPDOWN =====
+        // MENU DROPDOWN
         if let Some(menu) = self.active_menu {
-            let pos = ctx.cursor().expect("Cursor");
+            let pos = ctx.cursor().unwrap();
             Window::new(format!("{:?} Menu", menu)).collapsible(false).resizable(false).anchor(egui::Align2::LEFT_UP, [pos.x, pos.y + 20.0]).show(ctx, |ui| {
                 render_menu(self, ui, menu);
             });
         }
 
-        // ===== SIDEBAR =====
+        // SIDEBAR
         if self.sidebar_visible {
             SidePanel::left("sidebar").resizable(true).default_width(220.0).show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.toggle_sized(&mut (self.sidebar_tab == SidebarTab::Files), "📁");
-                    ui.toggle_sized(&mut (self.sidebar_tab == SidebarTab::Symbols), "🔣");
+                    for (tab, icon, name) in [(SidebarTab::Files, "📁", "Files"), (SidebarTab::Symbols, "🔣", "Symbols"), (SidebarTab::Macros, "⏺", "Macros"), (SidebarTab::Plugins, "🔌", "Plugins")] {
+                        let mut selected = self.sidebar_tab == tab;
+                        if ui.toggle_sized(&mut selected, icon).clicked() { self.sidebar_tab = tab; }
+                    }
                 });
                 ui.separator();
 
@@ -1158,15 +1338,11 @@ impl eframe::App for GeanyApp {
                     SidebarTab::Files => {
                         ScrollArea::vertical().show(ui, |ui| {
                             for (idx, doc) in self.documents.iter().enumerate() {
-                                let is_active = self.active_doc == Some(idx);
+                                let active = self.active_doc == Some(idx);
                                 let mut text = RichText::new(&doc.name);
                                 if doc.modified { text = text.color(Color32::YELLOW); }
-                                if is_active { text = text.bold(); }
-                                let response = ui.selectable_label(is_active, text);
-                                if response.clicked() { self.active_doc = Some(idx); }
-                                if response.context_menu(|ui| {
-                                    if ui.button("Close").clicked() { self.close_document(idx); }
-                                }).clicked() { self.active_doc = Some(idx); }
+                                if active { text = text.bold(); }
+                                if ui.selectable_label(active, text).clicked() { self.active_doc = Some(idx); }
                             }
                         });
                     }
@@ -1174,70 +1350,83 @@ impl eframe::App for GeanyApp {
                         if let Some(idx) = self.active_doc {
                             if let Some(doc) = self.documents.get(idx) {
                                 let symbols = SymbolParser::parse(&doc.content, doc.filetype);
-                                if symbols.is_empty() {
-                                    ui.label(RichText::new("No symbols").color(Color32::GRAY));
-                                } else {
-                                    ScrollArea::vertical().show(ui, |ui| {
-                                        for symbol in &symbols {
-                                            ui.horizontal(|ui| {
-                                                ui.label(RichText::new(symbol.kind.icon()).color(symbol.kind.color()).small());
-                                                if ui.link(&symbol.name).clicked() {
-                                                    if let Some(d) = self.documents.get_mut(idx) { d.cursor_line = symbol.line + 1; }
-                                                }
-                                            });
-                                        }
-                                    });
-                                }
+                                if symbols.is_empty() { ui.label("No symbols"); }
+                                else { ScrollArea::vertical().show(ui, |ui| { for s in &symbols { ui.horizontal(|ui| { ui.label(RichText::new(s.kind.icon()).color(s.kind.color()).small()); if ui.link(&s.name).clicked() { self.log(format!("Jump to line {}", s.line + 1)); } }); } }); }
                             }
+                        }
+                    }
+                    SidebarTab::Macros => {
+                        ui.label("Macros");
+                        ui.separator();
+                        if self.macro_manager.is_recording { ui.label(RichText::new("⏺ Recording...").color(Color32::KHAKI)); }
+                        else { ui.label("Not recording"); }
+                        ui.separator();
+                        ui.label("Saved Macros:");
+                        for (i, m) in self.macro_manager.saved_macros.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui.button(format!("▶ {}", m.name)).clicked() {
+                                    if let Some(idx) = self.active_doc {
+                                        let doc = &mut self.documents[idx];
+                                        let (c, _) = self.macro_manager.execute_macro(&doc.content, 0);
+                                        doc.content = c;
+                                        doc.modified = true;
+                                    }
+                                }
+                                if ui.button("🗑").clicked() { self.macro_manager.delete_macro(i); }
+                            });
+                        }
+                    }
+                    SidebarTab::Plugins => {
+                        for (i, plugin) in self.plugin_manager.plugins.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let mut enabled = plugin.enabled;
+                                if ui.checkbox(&mut enabled, &plugin.info.name).clicked() {
+                                    self.plugin_manager.plugins[i].enabled = enabled;
+                                    self.log(format!("Plugin '{}' {}", plugin.info.name, if enabled { "enabled" } else { "disabled" }));
+                                }
+                            });
+                            ui.label(RichText::new(&plugin.info.description).small().color(Color32::GRAY));
                         }
                     }
                 }
             });
         }
 
-        // ===== MAIN EDITOR =====
+        // MAIN EDITOR
         CentralPanel::default().show(ctx, |ui| {
-            // Tab bar
             ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (idx, doc) in self.documents.iter().enumerate() {
-                        let is_active = self.active_doc == Some(idx);
+                        let active = self.active_doc == Some(idx);
                         let mut label = doc.name.clone();
                         if doc.modified { label.push_str(" ●"); }
-                        if ui.selectable_label(is_active, label).clicked() { self.active_doc = Some(idx); }
+                        if ui.selectable_label(active, label).clicked() { self.active_doc = Some(idx); }
                     }
-                    if ui.button("+").clicked() { self.new_document(); }
+                    if ui.button("+").clicked() { self.new_doc(); }
                 });
             });
             ui.separator();
 
-            // Find bar
             if self.show_find {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("Find:");
-                        TextEdit::singleline(&mut self.find_replace.search_text).desired_width(180.0).show(ui);
-                        if ui.button("Find").clicked() { if let Some(idx) = self.active_doc { if let Some(doc) = self.documents.get(idx) { self.find_replace.search(&doc.content); self.log(format!("Found {} matches", self.find_replace.search_results.len())); } } }
+                        TextEdit::singleline(&mut self.find_replace.search_text).desired_width(150.0).show(ui);
+                        if ui.button("Find").clicked() { if let Some(idx) = self.active_doc { self.find_replace.search(&self.documents[idx].content); } }
                         ui.separator();
                         ui.label("Replace:");
-                        TextEdit::singleline(&mut self.find_replace.replace_text).desired_width(180.0).show(ui);
-                        if ui.button("Replace All").clicked() { if let Some(idx) = self.active_doc { let new_content = self.find_replace.replace_all(&self.documents[idx].content); self.documents[idx].content = new_content; self.documents[idx].modified = true; self.log("Replaced all".to_string()); } }
-                        ui.separator();
-                        ui.checkbox(&mut self.find_replace.case_sensitive, "Aa");
-                        ui.checkbox(&mut self.find_replace.whole_word, "W");
-                        ui.checkbox(&mut self.find_replace.regex, ".*");
+                        TextEdit::singleline(&mut self.find_replace.replace_text).desired_width(150.0).show(ui);
+                        if ui.button("Replace All").clicked() { if let Some(idx) = self.active_doc { let c = self.find_replace.replace_all(&self.documents[idx].content); self.documents[idx].content = c; self.documents[idx].modified = true; } }
                         if ui.button("✕").clicked() { self.show_find = false; }
                     });
                 });
                 ui.separator();
             }
 
-            // Editor content
             if let Some(idx) = self.active_doc {
                 if let Some(doc) = self.documents.get_mut(idx) {
-                    // Status bar
                     ui.horizontal(|ui| {
-                        ui.label("File:");
+                        ui.label(format!("📝 {}", doc.filetype.name()));
                         ComboBox::from_id_salt("ft").selected_text(doc.filetype.name()).show_ui(ui, |ui| {
                             ui.selectable_value(&mut doc.filetype, Filetype::Rust, "Rust");
                             ui.selectable_value(&mut doc.filetype, Filetype::C, "C");
@@ -1250,70 +1439,27 @@ impl eframe::App for GeanyApp {
                         });
                         ui.separator();
                         ui.label(format!("Ln {}, Col {}", doc.cursor_line, doc.cursor_col));
-                        ui.separator();
-                        if doc.modified { ui.label(RichText::new("Modified").color(Color32::YELLOW)); }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(format!("{} folds", doc.fold_state.regions.len())).small().color(Color32::GRAY));
-                        });
+                        if doc.modified { ui.label(RichText::new("●").color(Color32::YELLOW)); }
                     });
                     ui.separator();
 
-                    // Editor with line numbers
                     ScrollArea::vertical().show(ui, |ui| {
-                        // Line numbers + code side by side
-                        ui.horizontal(|ui| {
-                            // Line numbers gutter
-                            if self.settings.show_line_numbers {
-                                ui.vertical(|ui| {
-                                    ui.set_width(50.0);
-                                    let line_count = doc.content.lines().count().max(1);
-                                    for i in 1..=line_count {
-                                        let line_text = format!("{:>4}", i);
-                                        let color = if i == doc.cursor_line && self.settings.highlight_current_line {
-                                            Color32::from_rgb(100, 100, 100)
-                                        } else {
-                                            Color32::GRAY
-                                        };
-                                        ui.label(RichText::new(line_text).small().monospace().color(color));
-                                    }
-                                });
-                                ui.separator();
+                        let mut text = doc.content.clone();
+                        TextEdit::multiline(&mut text).font(FontId::monospace(14.0)).desired_width(f32::MAX).show(ui);
+                        if text != doc.content {
+                            // Record macro action
+                            if self.macro_manager.is_recording {
+                                self.macro_manager.record_insert(&text);
                             }
-                            
-                            // Code area
-                            ui.vertical(|ui| {
-                                let mut text = doc.content.clone();
-                                
-                                // Word wrap option
-                                let desired_width = if self.settings.word_wrap { 
-                                    self.settings.wrap_width as f32 
-                                } else { 
-                                    f32::MAX 
-                                };
-                                
-                                TextEdit::multiline(&mut text)
-                                    .font(FontId::monospace(14.0))
-                                    .desired_width(desired_width)
-                                    .show(ui);
-                                
-                                if text != doc.content {
-                                    doc.content = text;
-                                    doc.modified = true;
-                                    doc.fold_state.parse_folds(&doc.content);
-                                }
-                            });
-                        });
+                            doc.content = text;
+                            doc.modified = true;
+                        }
                     });
-
-                    // Update bracket matching
-                    if self.settings.bracket_highlight {
-                        doc.update_bracket_match();
-                    }
                 }
             }
         });
 
-        // ===== STATUS BAR =====
+        // STATUS BAR
         TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(idx) = self.active_doc {
@@ -1323,75 +1469,78 @@ impl eframe::App for GeanyApp {
                         ui.label(RichText::new(format!("Ln {}, Col {}", doc.cursor_line, doc.cursor_col)).small());
                         ui.separator();
                         ui.label(RichText::new(doc.filetype.name()).small());
-                        ui.separator();
-                        ui.label(RichText::new(&doc.encoding).small());
-                        ui.separator();
-                        if doc.modified { ui.label(RichText::new("●").small().color(Color32::YELLOW)); }
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{}{}", if self.settings.use_spaces { "Spaces:" } else { "Tabs:" }, self.settings.indent_width)).small().color(Color32::GRAY));
+                if let Some(ref p) = self.project {
                     ui.separator();
-                    ui.label(RichText::new("Geany-Rs v0.3.0").small().color(Color32::GRAY));
+                    ui.label(RichText::new(format!("📁 {}", p.name)).small().color(Color32::KHAKI));
+                }
+                if self.macro_manager.is_recording {
+                    ui.separator();
+                    ui.label(RichText::new("⏺ REC").small().color(Color32::RED));
+                }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("Geany-Rs v0.4.0").small().color(Color32::GRAY));
                 });
             });
         });
 
-        // ===== MESSAGE PANEL =====
+        // MESSAGE PANEL
         if self.messages_visible {
-            TopBottomPanel::bottom("messages").resizable(true).default_height(100.0).show(ctx, |ui| {
+            TopBottomPanel::bottom("messages").resizable(true).default_height(80.0).show(ctx, |ui| {
                 ui.horizontal(|ui| { ui.label("📋"); if ui.button("Clear").clicked() { self.messages.clear(); } });
                 ui.separator();
                 ScrollArea::vertical().show(ui, |ui| { for msg in &self.messages { ui.label(msg.clone()); } });
             });
         }
 
-        // ===== TERMINAL =====
+        // TERMINAL
         if self.terminal.visible {
-            TopBottomPanel::bottom("terminal").resizable(true).default_height(180.0).show(ctx, |ui| {
+            TopBottomPanel::bottom("terminal").resizable(true).default_height(150.0).show(ctx, |ui| {
                 ui.horizontal(|ui| { ui.label("🖥️ Terminal:"); if ui.button("Clear").clicked() { self.terminal.history.clear(); } });
                 ui.separator();
-                ScrollArea::vertical().id_salt("term").show(ui, |ui| {
-                    let text = self.terminal.history.join("\n");
-                    ui.label(RichText::new(&text).monospace().size(12.0));
-                });
+                ScrollArea::vertical().show(ui, |ui| { ui.label(RichText::new(self.terminal.history.join("\n")).monospace().size(12.0)); });
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("$");
-                    let response = TextEdit::singleline(&mut self.terminal.command_input).font(FontId::monospace(14.0)).show(ui);
-                    if response.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.terminal.execute(&self.terminal.command_input, self);
-                        self.terminal.command_input.clear();
-                    }
+                    let r = TextEdit::singleline(&mut self.terminal.command_input).show(ui);
+                    if r.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) { self.terminal.execute(&self.terminal.command_input, self); self.terminal.command_input.clear(); }
                 });
             });
         }
 
-        // ===== DIALOGS =====
+        // GOTO LINE DIALOG
         if self.show_goto_line {
             Window::new("Go to Line").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                ui.label("Line number:");
-                TextEdit::singleline(&mut self.goto_line).desired_width(100.0).request_focus().show(ui);
+                ui.label("Line:");
+                TextEdit::singleline(&mut self.goto_line).desired_width(80.0).request_focus().show(ui);
                 ui.horizontal(|ui| {
-                    if ui.button("Go").clicked() { self.goto_line(); }
+                    if ui.button("Go").clicked() { if let Ok(l) = self.goto_line.parse::<usize>() { if let Some(idx) = self.active_doc { self.documents[idx].cursor_line = l; } } self.show_goto_line = false; self.goto_line.clear(); }
                     if ui.button("Cancel").clicked() { self.show_goto_line = false; self.goto_line.clear(); }
                 });
             });
         }
 
-        if self.show_settings {
-            render_settings_dialog(self, ctx);
+        // AUTO-COMPLETION POPUP
+        if self.completer.show_popup {
+            Window::new("Completions").collapsible(false).resizable(false).anchor(egui::Align2::LEFT_BOTTOM, [100.0, 300.0]).show(ctx, |ui| {
+                ui.label("Completions:");
+                for (i, item) in self.completer.items.iter().enumerate() {
+                    let selected = i == self.completer.selected_index;
+                    let text = RichText::new(format!("{} {}", item.kind.icon(), item.label));
+                    if selected { ui.label(RichText::new(format!("▶ {}", text)).color(Color32::KHAKI)); }
+                    else { ui.label(text); }
+                }
+                ui.separator();
+                ui.label("Press Enter to insert, Esc to close");
+            });
         }
     }
 }
 
-// ============================================================================
-// ENTRY POINT
-// ============================================================================
-
 fn main() {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 900.0]).with_min_inner_size([800.0, 600.0]).with_title("Geany-Rs v0.3.0 - Rust IDE"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 900.0]).with_min_inner_size([800.0, 600.0]).with_title("Geany-Rs v0.4.0 - IDE with Project/Macros/Plugins"),
         ..Default::default()
     };
     eframe::run_native("Geany-Rs", options, Box::new(|cc| Ok(Box::new(GeanyApp::new(cc))))).unwrap();
