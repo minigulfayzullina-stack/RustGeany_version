@@ -44,16 +44,25 @@
 
 | Category | Crate | Purpose |
 |----------|-------|---------|
-| **GUI Framework** | `gtk4-rs` | Rust bindings for GTK4 (successor to GTK3) |
-| **Text Editor** | `scintilla.rs` | Scintilla bindings for Rust |
+| **GUI Framework** | `egui` + `eframe` | Pure Rust immediate mode GUI (chosen!) |
+| **Text Editor** | `egui_code_editor` / custom | Syntax highlighting editor |
 | **Async Runtime** | `tokio` | Async I/O, concurrency |
 | **Plugin System** | `rustic-plugin` (new) | Plugin API design |
 | **Serialization** | `serde` + `serde_json` | Config/project files |
 | **Logging** | `tracing` | Structured logging |
 | **CLI Args** | `clap` | Command-line argument parsing |
 | **File Watching** | `notify` | File change monitoring |
-| **Terminal** | `vte` | VTE widget bindings |
+| **Terminal** | `xtermjs` / custom | Terminal emulation |
 | **Internationalization** | `fluent-rs` / `rust-i18n` | Modern i18n |
+
+### Why egui?
+
+- ✅ **Pure Rust** - No C dependencies, easier compilation
+- ✅ **Immediate mode** - Simple mental model, easy to reason about
+- ✅ **Cross-platform** - Works on Windows, macOS, Linux, and Web
+- ✅ **Lightweight** - Minimal dependencies
+- ✅ **Fast** - Immediate rendering, no retained widgets
+- ✅ **Customizable** - Full control over UI rendering
 
 ---
 
@@ -68,7 +77,7 @@ cargo init --workspace
 
 # Add workspace members
 cargo new --lib geany-core        # Core application logic
-cargo new --lib geany-ui          # GTK UI components
+cargo new --lib geany-ui          # egui UI components
 cargo new --lib geany-plugin     # Plugin API
 cargo new --bin geany             # Main binary
 ```
@@ -87,8 +96,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-gtk = "0.9"
-scintilla = "5.5"
+eframe = "0.32"
+egui = "0.32"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
@@ -112,9 +121,22 @@ anyhow = "1"
 parking_lot = "0.12"
 once_cell = "1"
 dirs = "6"
+```
 
-[build-dependencies]
-pkg-config = "0.3"
+### 1.4 UI Dependencies (egui)
+
+```toml
+# geany-ui/Cargo.toml
+[package]
+name = "geany-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+parking_lot = "0.12"
+dirs = "6"
 ```
 
 ---
@@ -217,35 +239,52 @@ geany-core/src/
 
 ## Phase 3: UI Layer (Week 7-12)
 
-### 3.1 GTK4 Integration
+### 3.1 egui Integration
 
 ```rust
 // geany-ui/src/main_window.rs
-use gtk::prelude::*;
-use gtk::{Application, ApplicationWindow, Builder};
-use std::sync::Arc;
+use egui::{CentralPanel, TopBottomPanel, SidePanel};
+use eframe::egui;
 
-pub struct MainWindow {
-    window: ApplicationWindow,
-    notebook: gtk::Notebook,
-    sidebar: Sidebar,
-    toolbar: Toolbar,
-    msgwin: MessageWindow,
+pub struct GeanyApp {
+    pub documents: Vec<Document>,
+    pub active_doc: Option<usize>,
 }
 
-impl MainWindow {
-    pub fn new(app: &Application) -> Self {
-        let builder = Builder::from_resource("/org/geany/ui/main.ui");
-        
-        let window: ApplicationWindow = builder.object("main_window")
-            .expect("Failed to get main_window");
-            
-        let notebook: gtk::Notebook = builder.object("notebook")
-            .expect("Failed to get notebook");
-            
-        // ... setup other components
-        
-        Self { window, notebook, sidebar, toolbar, msgwin }
+impl eframe::App for GeanyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Top toolbar
+        TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("New").clicked() {
+                    self.new_document();
+                }
+                if ui.button("Open").clicked() {
+                    // Open file dialog
+                }
+                if ui.button("Save").clicked() {
+                    // Save current file
+                }
+            });
+        });
+
+        // Left sidebar (file tree, symbols)
+        SidePanel::left("sidebar").show(ctx, |ui| {
+            ui.label("Files");
+            ui.separator();
+            // File tree here
+        });
+
+        // Main editor area
+        CentralPanel::default().show(ctx, |ui| {
+            // Tab bar for open documents
+            // Editor content
+        });
+
+        // Bottom message panel
+        TopBottomPanel::bottom("messages").show(ctx, |ui| {
+            ui.label("Messages");
+        });
     }
 }
 ```
@@ -253,58 +292,47 @@ impl MainWindow {
 ### 3.2 UI Resource Structure
 
 ```
-geany-ui/resources/
+geany-ui/
 ├── Cargo.toml
-├── build.rs
-├── data/
-│   ├── main.ui           # GTK4 UI definition
-│   ├── geany.css         # Styles
-│   ├── colorschemes/     # Editor themes
-│   └── filedefs/         # Filetype configs
-└── src/
-    ├── lib.rs
-    ├── main_window.rs
-    ├── sidebar.rs
-    ├── toolbar.rs
-    ├── notebook.rs
-    ├── dialogs.rs
-    ├── callbacks.rs
-    └── completion.rs
+├── src/
+│   ├── lib.rs
+│   ├── main_window.rs     # Main app with egui
+│   ├── editor.rs          # Code editor widget
+│   ├── sidebar.rs         # File tree, symbols panel
+│   ├── toolbar.rs         # Top toolbar
+│   ├── tabs.rs            # Document tabs
+│   ├── messages.rs        # Bottom message panel
+│   └── theme.rs           # Editor themes/colors
+└── themes/                # Color schemes
 ```
 
-### 3.3 Scintilla Integration
+### 3.3 Editor Integration
 
 ```rust
-// geany-ui/src/editor_widget.rs
-use gtk::prelude::*;
-use scintilla::Scintilla;
+// geany-ui/src/editor.rs
+use egui::{Color32, FontId, RichText, TextEdit};
+use std::sync::Arc;
 
-pub struct EditorView {
-    scilla: Scintilla,
-    doc_id: DocumentId,
+pub struct CodeEditor {
+    pub content: String,
+    pub cursor_pos: (usize, usize),  // line, col
+    pub syntax_highlight: SyntaxHighlight,
 }
 
-impl EditorView {
+impl CodeEditor {
     pub fn new() -> Self {
-        let scilla = Scintilla::new();
-        scilla.set_id("editor".to_string());
-        
-        Self { scilla, doc_id: 0 }
+        Self {
+            content: String::new(),
+            cursor_pos: (0, 0),
+            syntax_highlight: SyntaxHighlight::default(),
+        }
     }
-    
-    pub fn set_text(&self, text: &str) {
-        self.scilla.set_text(text);
-    }
-    
-    pub fn get_text(&self) -> String {
-        self.scilla.text()
-    }
-    
-    pub fn connect_modified<F>(&self, callback: F)
-    where
-        F: Fn(&Scintilla, i32, i32, i32) + 'static,
-    {
-        self.scilla.connect_modify(callback);
+
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        TextEdit::multiline(&mut self.content)
+            .font(FontId::monospace(14.0))
+            .code_editor()
+            .show(ui);
     }
 }
 ```
@@ -511,20 +539,20 @@ strip = true
 
 | Challenge | Solution |
 |-----------|----------|
-| GTK3 → GTK4 | Use GTK4 with compatible widgets; some GTK3 APIs differ |
-| Scintilla C → Rust | Use existing `scintilla` crate or create bindings |
-| Plugin ABI compatibility | Create FFI layer for existing C plugins |
-| Large codebase | Incremental migration, maintain C/Gtk2 version |
+| egui text editor | Use `egui_code_editor` crate or build custom |
+| Syntax highlighting | Use `syntect` with egui's rich text |
+| Terminal emulation | Use `xterm-rs` or embedded webview |
+| Plugin compatibility | New pure-Rust plugin system (not C ABI) |
+| Large codebase | Incremental migration, maintain C version |
 | Performance | Use `parking_lot` for locking, async for I/O |
 
 ### Dependencies to Evaluate
 
 ```toml
-# Consider these alternatives
-vte = "0.14"          # Terminal widget
-tree-sitter = "0.24"  # Alternative to ctags for symbol parsing
-lsp-types = "0.96"    # Language Server Protocol support
-syntect = "5"          # Syntax highlighting (alternative to Scintilla)
+# egui ecosystem
+egui_code_editor = "0.3"   # Code editor with syntax highlighting
+syntect = "5"               # Syntax highlighting engine
+xterm = "0.1"               # Terminal widget
 ```
 
 ---
@@ -577,8 +605,8 @@ geany-rs/
 
 ## Next Steps
 
-1. **Decision Point**: GTK3 vs GTK4 vs pure custom renderer
-2. **Proof of Concept**: Create minimal editor with Scintilla in Rust
+1. **✅ Decision Made**: Using egui for pure Rust GUI
+2. **Proof of Concept**: Create minimal editor with egui (see geany-rs/ folder)
 3. **Team Planning**: Assign modules to team members
 4. **CI/CD Setup**: Configure GitHub Actions for multi-platform builds
 5. **Documentation**: Migrate developer docs, API reference
